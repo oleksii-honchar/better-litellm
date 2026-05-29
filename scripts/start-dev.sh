@@ -158,7 +158,7 @@ echo "Waiting for health check..."
 
 # Start the proxy in background, wait for health
 cd "$BETTER_LITELLM_DIR"
-$RUN_CMD --port "$LITELLM_PORT" --config "$CONFIG_FILE" --detailed_messages &
+$RUN_CMD --port "$LITELLM_PORT" --config "$CONFIG_FILE" --detailed_debug &
 PROXY_PID=$!
 
 # Wait for health (up to 15 seconds)
