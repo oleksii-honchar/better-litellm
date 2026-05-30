@@ -2000,6 +2000,8 @@ class CustomStreamWrapper:
             if "Failed to parse input at pos" in error_str:
                 recovered_chunk = self._try_recover_llamacpp_parse_error(error_str)
                 if recovered_chunk is not None:
+                    # Terminate the stream — next iteration should stop
+                    self.completion_stream = None
                     return recovered_chunk
             traceback_exception = traceback.format_exc()
             # LOG FAILURE - handle streaming failure logging in the _next_ object, remove `handle_failure` once it's deprecated
@@ -2261,6 +2263,8 @@ class CustomStreamWrapper:
             if "Failed to parse input at pos" in error_str:
                 recovered_chunk = self._try_recover_llamacpp_parse_error(error_str)
                 if recovered_chunk is not None:
+                    # Terminate the stream — next iteration should stop
+                    self.completion_stream = None
                     return recovered_chunk
             traceback_exception = traceback.format_exc()
             if self.logging_obj is not None:
