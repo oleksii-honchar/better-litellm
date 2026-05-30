@@ -1,151 +1,282 @@
 # 01 — Tool Call Wrapper Tag Extraction
 
-**Date:** 2026-05-22
+**Date:** 2026-05-30
+**Status:** Implemented (Phase: Completed)
+**Branch:** `feat/spec-01`
 
 ---
 
 ## Description
 
-Strip `...` wrapper tags from content before `json.loads()` in `_check_and_fix_if_content_is_tool_call()`, so tool calls from llama.cpp models are parsed correctly.
+LiteLLM's `_check_and_fix_if_content_is_tool_call()` method and streaming `chunk_parser()` need to extract tool calls from Qwen-style XML tool call formats — including `...` wrapper tags, `<![CDATA[...]]>` wrappers, `<tool_call>...</tool_call>` wrappers, and JSON — when models served through llama.cpp return them.
 
 ---
 
 ## Problem
 
-When models served through llama-swap (llama.cpp) return tool calls, they often wrap the JSON in `...` tags:
+When models served through llama-swap (llama.cpp) return tool calls, they use one of several formats:
 
-```
-...{"type": "function", "name": "bash", "arguments": "{\"command\": \"ls\"}"}...
-```
+1. **Qwen XML in `...` tags** (most common in streaming):
+   ```
+   _<function=bash><parameter=command>ls</parameter></function>_
+   ```
+
+2. **JSON in `...` tags**:
+   ```
+   _{"name":"bash","arguments":{"command":"ls"}}_
+   ```
+
+3. **Qwen XML in `<tool_call>` wrapper tags**:
+   ```xml
+   <tool_call><function=grep><parameter=include>*.py</parameter></function></tool_call>
+   ```
+
+4. **Qwen XML in CDATA**:
+   ```xml
+   <![CDATA[<function=grep><parameter=include>*.py</parameter></function>]]>
+   ```
+
+5. **Pure JSON** (no wrapper):
+   ```json
+   {"name":"bash","arguments":{"command":"ls"}}
+   ```
 
 LiteLLM's `_check_and_fix_if_content_is_tool_call()` method passes the raw content (including tags) to `json.loads()`. Parsing fails, the method returns `None`, and the agent treats the response as plain text — the tool is never executed.
 
-**Observed behavior:** An agent sends a tool-calling request to a llama-swap model. The model responds with a valid tool call, but wrapped in `...`. LiteLLM's parser sees invalid JSON, returns no tool call, and the agent receives a text message containing the raw JSON string. The loop breaks.
+Additionally, llama.cpp's PEG autoparser (`common/chat.cpp:2601`) may fail on formats 3 and 4 when the server's chat template doesn't include `<tool_call>` wrapper tags. This generates a `400 Bad Request` error with the raw model output embedded in the error message — which requires error recovery, not just parsing.
 
 ---
 
 ## Root Cause
 
-The `...` tags are a llama.cpp convention for marking code blocks — equivalent to Markdown backtick fences but without the backticks. LiteLLM does not strip them before JSON parsing.
-
-Relevant code in `litellm/llms/openai/chat/gpt_transformation.py` (line 494):
-
-```python
-def _check_and_fix_if_content_is_tool_call(
-    self, content: str, optional_params: dict
-) -> Optional[ChatCompletionMessageToolCall]:
-    import json
-
-    if not self._passed_in_tools(optional_params):
-        return None
-    tool_call_names = get_tool_call_names(optional_params.get("tools", []))
-    try:
-        json_content = json.loads(content)  # ← FAILS when content has ... tags
-        if (
-            json_content.get("type") == "function"
-            and json_content.get("name") in tool_call_names
-        ):
-            return ChatCompletionMessageToolCall(...)
-    except Exception:
-        return None
-    return None
-```
-
-The `except Exception` block silently catches the `json.JSONDecodeError` and returns `None`, so the failure is invisible in logs.
-
----
-
-## Justification
-
-### Why patch instead of fix at the source?
-
-**Option A — Fix at the model/chat-template level.** Some would suggest adjusting the llama.cpp chat template to omit `...` around tool calls. This was rejected for two reasons:
-
-1. The `...` tags are a **llama.cpp convention**, not a bug. They signal "this is code" to the model during generation. Removing them from the template risks the model producing malformed JSON (the tags help the model stay structured).
-2. Multiple models share the same llama-swap config. A template change affects all models and may break other behavior.
-
-**Option B — Fix at the LiteLLM level.** This is the right place because:
-
-1. LiteLLM is the **translation layer** between OpenAI-compatible responses and the caller. It already handles provider-specific quirks (e.g., Anthropic's function calling format conversion). Stripping `...` tags fits this pattern.
-2. The fix is **localized** — one method, one condition, no changes to chat templates or model behavior.
-3. The fix is **non-breaking** — when no `...` tags are present, the content passes through unchanged.
-
-### Why this specific approach?
-
-- **String operations over regex:** `startswith("...")` + slicing is faster and simpler than `re.sub(r'^\.\.\.(.*)\.\.\.$', r'\1', content)`. This runs on every assistant message.
-- **Single-layer stripping:** Only one pass of `...` removal. Nested `...` are not expected and would indicate a model issue needing separate investigation.
-- **No changes to other parsers:** This targets only `_check_and_fix_if_content_is_tool_call()`. The streaming path may need similar treatment but is deferred until a real issue is observed.
+1. **Multiple output formats:** The Qwopus3.6 model is trained on multiple tool call formats and may output any of them depending on context.
+2. **No extraction in litellm:** LiteLLM only attempts `json.loads(content)` — no XML extraction, no CDATA stripping, no `<tool_call>` wrapper detection.
+3. **llama.cpp PEG parse error:** The mammoth server's chat template was built without `<tool_call>` wrapper tags. When the model outputs format 3, the PEG parser fails at the `<tool_call>` tag position and returns a 400 error.
 
 ---
 
 ## Solution
 
-```python
-def _check_and_fix_if_content_is_tool_call(
-    self, content: str, optional_params: dict
-) -> Optional[ChatCompletionMessageToolCall]:
-    import json
+### 5-Format Extraction Cascade
 
-    if not self._passed_in_tools(optional_params):
-        return None
-    tool_call_names = get_tool_call_names(optional_params.get("tools", []))
+In `_check_and_fix_if_content_is_tool_call()`, try extraction in this order:
 
-    # Strip ... wrapper tags (llama.cpp convention for code blocks)
-    stripped = content.strip()
-    if stripped.startswith("...") and stripped.endswith("..."):
-        stripped = stripped[3:-3].strip()
+| Order | Format | Method | Trigger |
+|-------|--------|--------|---------|
+| 1 | Qwen XML in `...` tags | `_extract_xml_from_tool_call_tags()` | Content starts/ends with `...` |
+| 2 | JSON in `...` tags | `_extract_json_from_tool_call_tags()` | Content starts/ends with `...` |
+| 3 | Qwen XML in `<tool_call>` tags | `_extract_xml_from_tool_call_wrapper_tags()` | Contains `<tool_call>` |
+| 4 | Qwen XML in CDATA | `_extract_xml_from_cdata_tags()` | Contains `<![CDATA[` |
+| 5 | Pure JSON | `_parse_json_to_tool_call()` | Try `json.loads()` |
 
-    try:
-        json_content = json.loads(stripped)  # ← uses stripped content
-        if (
-            json_content.get("type") == "function"
-            and json_content.get("name") in tool_call_names
-        ):
-            return ChatCompletionMessageToolCall(
-                function=Function(
-                    name=json_content.get("name"),
-                    arguments=json_content.get("arguments"),
-                )
-            )
-    except Exception:
-        return None
+### Streaming Buffer-Based Extraction
 
-    return None
+Add `_tool_call_buffer` state to `OpenAIChatCompletionStreamingHandler.__init__()`. Modify `chunk_parser()` to:
+
+1. Accumulate content across chunks into `_tool_call_buffer`
+2. When content or buffer contains `...`, `<tool_call`, or `<![CDATA[`, attempt extraction via `_extract_tool_calls_from_buffer()`
+3. On successful extraction: set `delta["content"] = ""` (already emitted), emit `delta["tool_calls"]`, clear buffer
+4. On incomplete detection: leave content in buffer for next chunk
+5. Normal chunks (no tool call markers) pass through unchanged
+
+### llama.cpp PEG Parse Error Recovery
+
+Catch `openai.BadRequestError` with "Failed to parse input at pos N" in:
+
+- **Non-streaming** (`make_openai_chat_completion_request`): Extract tool calls from error message, reconstruct `ChatCompletion` via `_reconstruct_chat_completion_response()`
+- **Streaming** (`__anext__`/`__next__` in `CustomStreamWrapper`): Extract tool calls from error message, yield `ModelResponseStream` with `finish_reason="tool_calls"`, set `completion_stream = None` AND `make_call = None`
+
+---
+
+## Changes
+
+### File: `litellm/llms/openai/chat/gpt_transformation.py`
+
+#### New Static Methods on `OpenAIGPTConfig`
+
+1. **`_extract_xml_from_tool_call_tags(text) -> Optional[str]`** — Extract Qwen XML from `...` tags
+   ```python
+   @staticmethod
+   def _extract_xml_from_tool_call_tags(text: str) -> Optional[str]:
+       match = re.search(r"```[\s]*(<function=\S+?>.*?</function>)\s*```", text, re.DOTALL)
+       if match:
+           return match.group(1)
+       return None
+   ```
+
+2. **`_extract_json_from_tool_call_tags(text) -> Optional[str]`** — Extract JSON from `...` tags
+   ```python
+   @staticmethod
+   def _extract_json_from_tool_call_tags(text: str) -> Optional[str]:
+       match = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", text, re.DOTALL)
+       if match:
+           return match.group(1)
+       return None
+   ```
+
+3. **`_extract_xml_from_tool_call_wrapper_tags(text) -> Optional[str]`** — Extract Qwen XML from `<tool_call>` wrapper
+   ```python
+   @staticmethod
+   def _extract_xml_from_tool_call_wrapper_tags(text: str) -> Optional[str]:
+       match = re.search(
+           r"<tool_call[^>]*>\s*(<function=\S+?>.*?</function>)\s*</tool_call>",
+           text, re.DOTALL
+       )
+       if match:
+           return match.group(1)
+       return None
+   ```
+
+4. **`_extract_xml_from_cdata_tags(text) -> Optional[str]`** — Extract Qwen XML from CDATA
+   ```python
+   @staticmethod
+   def _extract_xml_from_cdata_tags(text: str) -> Optional[str]:
+       match = re.search(r"<!\[CDATA\[(<function=\S+?>.*?</function>)\]\]>", text, re.DOTALL)
+       if match:
+           return match.group(1)
+       return None
+   ```
+
+5. **`_parse_qwen_xml_to_tool_call(xml_content) -> Optional[ChatCompletionMessageToolCall]`** — Parse `<function>`/`<parameter>` XML elements
+   ```python
+   @staticmethod
+   def _parse_qwen_xml_to_tool_call(xml_content: str) -> Optional[ChatCompletionMessageToolCall]:
+       import re
+       import json
+       import uuid
+       # ... regex parsing of function name and parameters ...
+   ```
+
+6. **`_parse_json_to_tool_call(data) -> Optional[ChatCompletionMessageToolCall]`** — Parse JSON to tool call (backward compat)
+
+7. **`_is_llamacpp_parse_error(message) -> bool`** — Detect llama.cpp PEG parse error
+   ```python
+   @staticmethod
+   def _is_llamacpp_parse_error(message: str) -> bool:
+       return "Failed to parse input at pos" in str(message)
+   ```
+
+8. **`_extract_tool_calls_from_llamacpp_error(error_text) -> Optional[List[ChatCompletionMessageToolCall]]`** — Extract tool calls from error message, tries all 5 formats
+
+#### Modified: `_check_and_fix_if_content_is_tool_call()`
+
+```
+Before: json.loads(content) only → silently fails for non-JSON
+After:  Try 5 formats in cascade → returns ChatCompletionMessageToolCall for any
 ```
 
-### Changes
+#### Modified: `chunk_parser()` (streaming)
 
-1. Added `import json` already exists — no change.
-2. Added 4 lines between `tool_call_names = ...` and `try:`:
-   - `stripped = content.strip()`
-   - `if stripped.startswith("...") and stripped.endswith("..."): `
-   - `    stripped = stripped[3:-3].strip()`
-3. Changed `json.loads(content)` → `json.loads(stripped)`
+```
+Before: Pass-through with no tool call extraction
+After:  Content accumulated in _tool_call_buffer, extracted when complete, 
+        buffer cleared, delta["content"] = "" after extraction
+```
 
-**Net change: 4 new lines, 1 modified line.**
+### File: `litellm/llms/openai/openai.py`
+
+#### New: `_reconstruct_chat_completion_response()`
+
+```python
+def _reconstruct_chat_completion_response(
+    model: str,
+    tool_calls: List[ChatCompletionMessageToolCall],
+) -> ChatCompletion:
+    """Reconstruct a ChatCompletion from extracted tool calls."""
+```
+
+#### Modified: `make_openai_chat_completion_request()` (async)
+
+```
+try:
+    response = await client.chat.completions.create(**request_data)
+except openai.BadRequestError as e:
+    if "Failed to parse input at pos" in str(e):
+        tool_calls = OpenAIGPTConfig._extract_tool_calls_from_llamacpp_error(str(e))
+        if tool_calls:
+            return _reconstruct_chat_completion_response(model, tool_calls)
+    raise
+```
+
+#### Modified: `make_sync_openai_chat_completion_request()` (sync) — Same pattern
+
+### File: `litellm/litellm_core_utils/streaming_handler.py`
+
+#### New: `_try_recover_llamacpp_parse_error()`
+
+#### Modified: `__anext__()` and `__next__()`
+
+```python
+except Exception as e:
+    if "Failed to parse input at pos" in str(e):
+        recovered = self._try_recover_llamacpp_parse_error(str(e))
+        if recovered is not None:
+            self.completion_stream = None  # Terminate errored stream
+            self.make_call = None          # Prevent fetch_stream from re-fetching
+            return recovered
+```
+
+---
+
+## Bugs Found and Fixed
+
+### 1. Qwen XML Parameter Regex (Critical)
+
+**Bug:** `\S+` in `<parameter=(\S+)>` over-consumed when values on same line:
+```python
+# Before (wrong):
+r"<parameter=(\S+)>(.*?)</parameter>"
+# After (fixed):
+r"<parameter=([^>]+)>(.*?)</parameter>"
+```
+
+**Impact:** All same-line parameter names were wrong. Fixes CDATA and `<tool_call>` wrapper format parsing.
+
+### 2. Streaming Content Duplication (Critical)
+
+**Bug:** After extracting a tool call from the buffer, `delta["content"] = remaining` re-emitted all previously-emitted text.
+
+**Fix:** `delta["content"] = ""` and `self._tool_call_buffer = ""` after extraction.
+
+### 3. Streaming Recovery Re-Fetch (Critical)
+
+**Bug:** After streaming recovery, `self.completion_stream = None` caused `fetch_stream()` to make a new HTTP request on the next `__anext__` call, resulting in `'NoneType' object is not an iterator`.
+
+**Root cause:** `fetch_stream()` condition: `if self.completion_stream is None and self.make_call is not None`.
+
+**Fix:** Also set `self.make_call = None` after recovery.
 
 ---
 
 ## Testing
 
-| Scenario | Input | Expected |
-|----------|-------|----------|
-| Normal tool call with `...` | `...{"type":"function","name":"bash","arguments":"..."}...` | Parsed correctly, tool executed |
-| Normal tool call without `...` | `{"type":"function","name":"bash","arguments":"..."}` | Parsed correctly (no change) |
-| Starts with `...` but doesn't end | `...{"type":"function"} extra text` | Not stripped, parsing fails → None (existing behavior) |
-| Empty after stripping | `......` (six dots) | Stripped to empty string, `json.loads("")` → None |
-| Cloud model response | `{"type":"function",...}` | No `...` tags → no stripping → parsed normally |
-| Non-tool-call content | `Hello, how are you?` | No `...` tags → no change → not a tool call → None |
+| Suite | Tests | Pass | Fail | Description |
+|-------|-------|------|------|-------------|
+| `test_openai_gpt_transformation.py` | 39 | 39 | 0 | Original tests + error detection/extraction/recovery |
+| `test_qwen_xml_tool_call.py` | 33 | 33 | 0 | Non-streaming Qwen XML/JSON/CDATA/`<tool_call>` parsing |
+| `test_streaming_qwen_xml_tool_call.py` | 8 | 8 | 0 | Streaming buffer extraction |
+| **Total** | **80** | **80** | **0** | **Zero regressions** |
+
+### Key Test Cases
+
+- Qwen XML in `...` tags: function name, parameters, empty params, multiline values
+- JSON in `...` tags: backward compat with existing tools
+- `<tool_call>` wrapper: plain, with whitespace, with attributes
+- CDATA wrapper: inside and outside error messages
+- llama.cpp error recovery: non-streaming, streaming, non-PEG errors re-raised
+- Streaming buffer: multi-chunk, text-before-tool-call (regression for duplication), multiple tool calls
+- `make_call = None` verification: no re-fetch after streaming recovery
 
 ---
 
-## Scope
+## Commits
 
-**In scope:**
-- Non-streaming tool call parsing in `_check_and_fix_if_content_is_tool_call()`
-- The `...` tag convention from llama.cpp
+| Hash | Message | Date |
+|------|---------|------|
+| `6b62623282` | feat(openai): add multi-format tool call parsing for GPT models | 2026-05-24 |
+| `830e4631bd` | feat(openai): recover tool calls from llama.cpp PEG parse errors | 2026-05-30 |
+| `0d703cde63` | fix(streaming_handler): terminate stream on successful Llama.cpp parse recovery | 2026-05-30 |
+| `b55ec6f011` | `<tool_call>` wrapper tag support in error parsing | 2026-05-30 |
+| `0c1934f42e` | CDATA XML support | 2026-05-30 |
 
-**Out of scope (deferred):**
-- Streaming tool call chunk assembly (may need similar treatment)
-- Other wrapper conventions (e.g., ```) — use standard Markdown stripping if needed later
-- Chat template adjustments in llama-swap
+**Uncommitted:** `self.make_call = None` streaming fix (2026-05-30)

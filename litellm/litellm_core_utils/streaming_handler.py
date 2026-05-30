@@ -68,6 +68,8 @@ def _next_sync_or_exhausted(it: Any) -> Any:
     converts StopIteration to RuntimeError before any except clause can catch it.
     Returning a sentinel instead keeps StopIteration out of the coroutine boundary.
     """
+    if it is None:
+        return _SYNC_ITER_EXHAUSTED
     try:
         return next(it)
     except StopIteration:
@@ -1838,6 +1840,9 @@ class CustomStreamWrapper:
             if self.completion_stream is None:
                 self.fetch_sync_stream()
 
+            if self.completion_stream is None:
+                raise StopIteration
+
             while True:
                 if (
                     isinstance(self.completion_stream, str)
@@ -2041,6 +2046,9 @@ class CustomStreamWrapper:
         try:
             if self.completion_stream is None:
                 await self.fetch_stream()
+
+            if self.completion_stream is None:
+                raise StopAsyncIteration
 
             if is_async_iterable(self.completion_stream):
                 async for chunk in self.completion_stream:  # type: ignore[union-attr]
