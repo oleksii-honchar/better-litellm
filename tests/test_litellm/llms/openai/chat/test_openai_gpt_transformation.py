@@ -2,6 +2,7 @@
 Tests for OpenAI GPT transformation (litellm/llms/openai/chat/gpt_transformation.py)
 """
 
+import json
 import os
 import sys
 
@@ -680,3 +681,64 @@ class TestLlamaCPPParseErrorRecovery:
         assert len(tool_calls) == 1
         assert tool_calls[0].function.name == "search"
         assert tool_calls[0].function.arguments == '{"query": "test"}'
+
+    def test_extract_tool_calls_from_tool_call_wrapper(self):
+        """Test extracting Qwen XML from <tool_call> wrapper tags in error."""
+        error_msg = (
+            "Failed to parse input at pos 265: <tool_call>\n"
+            "<function=grep>\n"
+            "<parameter=path>/Users/oleksii.honchar/www/misc/better-opencode</parameter>\n"
+            "<parameter=pattern>litellm</parameter>\n"
+            "<parameter=include>*.{ts,js,json}</parameter>\n"
+            "</function>\n"
+            "</tool_call>"
+        )
+        tool_calls = OpenAIGPTConfig._extract_tool_calls_from_llamacpp_error(error_msg)
+        assert tool_calls is not None
+        assert len(tool_calls) == 1
+        assert tool_calls[0].id == "call_1"
+        assert tool_calls[0].type == "function"
+        assert tool_calls[0].function.name == "grep"
+        args = json.loads(tool_calls[0].function.arguments)
+        assert args["path"] == "/Users/oleksii.honchar/www/misc/better-opencode"
+        assert args["pattern"] == "litellm"
+        assert args["include"] == "*.{ts,js,json}"
+
+    def test_extract_multiple_tool_calls_from_wrappers(self):
+        """Test extracting multiple tool calls from <tool_call> wrappers."""
+        error_msg = (
+            "Failed to parse input at pos 100: <tool_call>\n"
+            "<function=grep>\n"
+            "<parameter=pattern>test</parameter>\n"
+            "</function>\n"
+            "</tool_call>\n"
+            "<tool_call>\n"
+            "<function=ls>\n"
+            "<parameter=path>/tmp</parameter>\n"
+            "</function>\n"
+            "</tool_call>"
+        )
+        tool_calls = OpenAIGPTConfig._extract_tool_calls_from_llamacpp_error(error_msg)
+        assert tool_calls is not None
+        assert len(tool_calls) == 2
+        assert tool_calls[0].function.name == "grep"
+        assert tool_calls[1].function.name == "ls"
+
+    def test_extract_tool_calls_with_wrapper_and_codeblock_mixed(self):
+        """Test extracting tool calls when error contains both formats."""
+        error_msg = (
+            "Failed to parse input at pos 100: <tool_call>\n"
+            "<function=grep>\n"
+            "<parameter=pattern>test</parameter>\n"
+            "</function>\n"
+            "</tool_call>\n"
+            "```_\n"
+            '{"name": "ls", "arguments": {"path": "/tmp"}}\n'
+            "_```"
+        )
+        tool_calls = OpenAIGPTConfig._extract_tool_calls_from_llamacpp_error(error_msg)
+        assert tool_calls is not None
+        assert len(tool_calls) == 2
+        # JSON in ```_ tags is extracted before <tool_call> wrappers
+        assert tool_calls[0].function.name == "ls"
+        assert tool_calls[1].function.name == "grep"

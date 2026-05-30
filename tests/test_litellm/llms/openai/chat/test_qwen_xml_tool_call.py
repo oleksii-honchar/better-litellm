@@ -217,3 +217,35 @@ class TestCheckAndFixIfContentIsToolCall:
         content = "Here is the answer: 42"
         result = config._check_and_fix_if_content_is_tool_call(content, optional_params_with_tools)
         assert result is None
+
+    def test_tool_call_wrapper_qwen_xml(self, config, optional_params_with_tools):
+        content = "<tool_call>\n<function=bash>\n<parameter=command>find /Users/oleksii.honchar/www/misc/better-opencode -name '*.ts'</parameter>\n</function>\n</tool_call>"
+        result = config._check_and_fix_if_content_is_tool_call(content, optional_params_with_tools)
+        assert result is not None
+        assert result.function.name == "bash"
+        args = json.loads(result.function.arguments)
+        assert args["command"] == "find /Users/oleksii.honchar/www/misc/better-opencode -name '*.ts'"
+
+
+class TestExtractXmlFromToolCallWrapperTags:
+    def test_simple_tool_call_wrapper(self):
+        content = "<tool_call>\n<function=bash>\n</function>\n</tool_call>"
+        result = OpenAIGPTConfig._extract_xml_from_tool_call_wrapper_tags(content)
+        assert result == "<function=bash>\n</function>"
+
+    def test_no_wrapper_returns_none(self):
+        content = "<function=bash>\n</function>"
+        result = OpenAIGPTConfig._extract_xml_from_tool_call_wrapper_tags(content)
+        assert result is None
+
+    def test_wrapper_with_attributes(self):
+        content = '<tool_call id="call_1">\n<function=bash>\n</function>\n</tool_call>'
+        result = OpenAIGPTConfig._extract_xml_from_tool_call_wrapper_tags(content)
+        assert result == "<function=bash>\n</function>"
+
+    def test_multiple_tool_calls(self):
+        content = "<tool_call>\n<function=grep>\n<parameter=pattern>test</parameter>\n</function>\n</tool_call>\n<tool_call>\n<function=ls>\n<parameter=path>/tmp</parameter>\n</function>\n</tool_call>"
+        result = OpenAIGPTConfig._extract_xml_from_tool_call_wrapper_tags(content)
+        # finditer returns first match
+        assert result is not None
+        assert "<function=grep>" in result
