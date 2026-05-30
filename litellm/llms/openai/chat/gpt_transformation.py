@@ -500,7 +500,8 @@ class OpenAIGPTConfig(BaseLLMModelInfo, BaseConfig):
         Tries:
         1. Qwen XML format (`` tags with <function>/<parameter> XML)
         2. JSON format inside `` tags ({"name":..., "arguments":...})
-        3. Pure JSON format (backward compatibility)
+        3. Qwen XML in <![CDATA[...]]> tags (Anthropic-style)
+        4. Pure JSON format (backward compatibility)
         """
         import json
 
@@ -508,7 +509,7 @@ class OpenAIGPTConfig(BaseLLMModelInfo, BaseConfig):
             return None
         tool_call_names = get_tool_call_names(optional_params.get("tools", []))
 
-        # 1) Try Qwen XML format
+        # 1) Try Qwen XML format in ```_ tags
         try:
             xml_content = self._extract_xml_from_tool_call_tags(content)
             if xml_content:
@@ -518,7 +519,7 @@ class OpenAIGPTConfig(BaseLLMModelInfo, BaseConfig):
         except Exception:
             pass
 
-        # 2) Try JSON format inside `` tags
+        # 2) Try JSON format inside ```_ tags
         try:
             json_content = self._extract_json_from_tool_call_tags(content)
             if json_content:
@@ -528,7 +529,17 @@ class OpenAIGPTConfig(BaseLLMModelInfo, BaseConfig):
         except Exception:
             pass
 
-        # 3) Fall back to pure JSON format (backward compatibility)
+        # 3) Try Qwen XML format in <![CDATA[...]]> tags
+        try:
+            cdata_xml = self._extract_xml_from_cdata_tags(content)
+            if cdata_xml:
+                tool_call = self._parse_qwen_xml_to_tool_call(cdata_xml)
+                if tool_call and tool_call.function.name in tool_call_names:
+                    return tool_call
+        except Exception:
+            pass
+
+        # 4) Fall back to pure JSON format (backward compatibility)
         try:
             json_content = json.loads(content)
             if (
@@ -563,6 +574,22 @@ class OpenAIGPTConfig(BaseLLMModelInfo, BaseConfig):
             json_content = match.group(1).strip()
             if json_content.startswith("{"):
                 return json_content
+        return None
+
+    @staticmethod
+    def _extract_xml_from_cdata_tags(content: str) -> Optional[str]:
+        """Extract Qwen XML tool call from <![CDATA[...]]> tags.
+
+        Anthropic-style CDATA-wrapped Qwen XML:
+        <![CDATA[<function=grep><parameter=pattern>...</parameter></function>]]>
+        """
+        import re
+        for match in re.finditer(
+            r'<!\[CDATA\[(<function=\S+?>.*?</function>)\]\]>', content, re.DOTALL
+        ):
+            xml_content = match.group(1).strip()
+            if xml_content.startswith("<function="):
+                return xml_content
         return None
 
     @staticmethod
@@ -624,9 +651,11 @@ class OpenAIGPTConfig(BaseLLMModelInfo, BaseConfig):
     ) -> Optional[List[ChatCompletionMessageToolCall]]:
         """Extract tool calls from a llama.cpp PEG parse error message.
 
-        The error format is: 'Failed to parse input at pos N: ```_\\n{...}\\n_```...'
-        The content after the colon contains the raw model output with ```_ tags.
-        We use the existing extraction logic to parse the tool calls from that content.
+        The error format is: 'Failed to parse input at pos N: <raw_output>'
+        The raw output may contain:
+        - ```_ ... ``` tags (Qwen XML or JSON)
+        - <![CDATA[<function=...>]]> tags (Anthropic-style CDATA wrapped Qwen XML)
+        We try all formats to parse the tool calls.
         """
         import re
 
@@ -639,7 +668,7 @@ class OpenAIGPTConfig(BaseLLMModelInfo, BaseConfig):
         raw_output = match.group(1).strip()
         tool_calls = []
 
-        # Try Qwen XML format first
+        # Try Qwen XML format in ```_ tags
         for xml_match in re.finditer(
             r'```_\s*(<function=\S+?>.*?</function>)\s*_```', raw_output, re.DOTALL
         ):
@@ -662,6 +691,23 @@ class OpenAIGPTConfig(BaseLLMModelInfo, BaseConfig):
         ):
             json_content = json_match.group(1)
             tool_call = OpenAIGPTConfig._parse_json_to_tool_call(json_content)
+            if tool_call:
+                tc_with_id = ChatCompletionMessageToolCall(
+                    id=f"call_{len(tool_calls) + 1}",
+                    type="function",
+                    function=Function(
+                        name=tool_call.function.name,
+                        arguments=tool_call.function.arguments,
+                    ),
+                )
+                tool_calls.append(tc_with_id)
+
+        # Try Qwen XML format in <![CDATA[...]]> tags
+        for cdata_match in re.finditer(
+            r'<!\[CDATA\[(<function=\S+?>.*?</function>)\]\]>', raw_output, re.DOTALL
+        ):
+            xml_content = cdata_match.group(1)
+            tool_call = OpenAIGPTConfig._parse_qwen_xml_to_tool_call(xml_content)
             if tool_call:
                 tc_with_id = ChatCompletionMessageToolCall(
                     id=f"call_{len(tool_calls) + 1}",
@@ -1026,7 +1072,7 @@ class OpenAIChatCompletionStreamingHandler(BaseModelResponseIterator):
         tool_calls = []
         remaining = self._tool_call_buffer
 
-        # Qwen XML pattern
+        # Qwen XML pattern in ```_ tags
         xml_pattern = re.compile(chr(96)*3 + r'_\s*(<function=\S+?>.*?</function>)\s*_' + chr(96)*3, re.DOTALL)
         for match in reversed(list(xml_pattern.finditer(remaining))):
             xml_content = match.group(1)
@@ -1040,11 +1086,25 @@ class OpenAIChatCompletionStreamingHandler(BaseModelResponseIterator):
                 tool_calls.append(tc_with_id)
             remaining = remaining[:match.start()] + remaining[match.end():]
 
-        # JSON pattern
+        # JSON pattern in ```_ tags
         json_pattern = re.compile(chr(96)*3 + r'_\s*(\{.*?\})\s*_' + chr(96)*3, re.DOTALL)
         for match in reversed(list(json_pattern.finditer(remaining))):
             json_content = match.group(1)
             tool_call = OpenAIGPTConfig._parse_json_to_tool_call(json_content)
+            if tool_call:
+                tc_with_id = ChatCompletionMessageToolCall(
+                    id=f"call_{len(tool_calls) + 1}",
+                    type="function",
+                    function=Function(name=tool_call.function.name, arguments=tool_call.function.arguments),
+                )
+                tool_calls.append(tc_with_id)
+            remaining = remaining[:match.start()] + remaining[match.end():]
+
+        # Qwen XML pattern in <![CDATA[...]]> tags
+        cdata_pattern = re.compile(r'<!\[CDATA\[(<function=\S+?>.*?</function>)\]\]>', re.DOTALL)
+        for match in reversed(list(cdata_pattern.finditer(remaining))):
+            xml_content = match.group(1)
+            tool_call = OpenAIGPTConfig._parse_qwen_xml_to_tool_call(xml_content)
             if tool_call:
                 tc_with_id = ChatCompletionMessageToolCall(
                     id=f"call_{len(tool_calls) + 1}",
