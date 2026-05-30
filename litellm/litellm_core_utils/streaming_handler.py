@@ -1993,6 +1993,14 @@ class CustomStreamWrapper:
                 )  # log response
                 return processed_chunk
         except Exception as e:
+            # Handle llama.cpp PEG parse errors during streaming — the server
+            # returns the raw model output with ```_ tool call tags in the error
+            # message.  We attempt to extract tool calls and reconstruct a chunk.
+            error_str = str(e)
+            if "Failed to parse input at pos" in error_str:
+                recovered_chunk = self._try_recover_llamacpp_parse_error(error_str)
+                if recovered_chunk is not None:
+                    return recovered_chunk
             traceback_exception = traceback.format_exc()
             # LOG FAILURE - handle streaming failure logging in the _next_ object, remove `handle_failure` once it's deprecated
             threading.Thread(
@@ -2246,6 +2254,14 @@ class CustomStreamWrapper:
                 )
             self._handle_stream_fallback_error(e)
         except Exception as e:
+            # Handle llama.cpp PEG parse errors during streaming — the server
+            # returns the raw model output with ```_ tool call tags in the error
+            # message.  We attempt to extract tool calls and reconstruct a chunk.
+            error_str = str(e)
+            if "Failed to parse input at pos" in error_str:
+                recovered_chunk = self._try_recover_llamacpp_parse_error(error_str)
+                if recovered_chunk is not None:
+                    return recovered_chunk
             traceback_exception = traceback.format_exc()
             if self.logging_obj is not None:
                 ## LOGGING
@@ -2258,6 +2274,65 @@ class CustomStreamWrapper:
                     self.logging_obj.async_failure_handler(e, traceback_exception)  # type: ignore
                 )
             self._handle_stream_fallback_error(e)
+
+    def _try_recover_llamacpp_parse_error(
+        self, error_str: str
+    ) -> Optional["ModelResponseStream"]:
+        """Try to recover tool calls from a llama.cpp PEG parse error during streaming.
+
+        When llama.cpp's PEG parser fails to parse tool calls (e.g., the model
+        outputs ```_ tags instead of the expected format), it returns a 200 with
+        the error in the SSE stream body.  The error message contains the raw
+        model output, which we can parse to extract tool calls.
+
+        Returns a ModelResponseStream with the recovered tool calls, or None if
+        recovery is not possible.
+        """
+        try:
+            from litellm.llms.openai.chat.gpt_transformation import OpenAIGPTConfig
+
+            tool_calls = OpenAIGPTConfig._extract_tool_calls_from_llamacpp_error(
+                error_str
+            )
+            if tool_calls is None:
+                return None
+
+            sdk_tool_calls: List[Dict[str, Any]] = []
+            for tc in tool_calls:
+                sdk_tool_calls.append(
+                    {
+                        "id": tc.id,
+                        "type": tc.type,
+                        "function": {
+                            "name": tc.function.name,
+                            "arguments": tc.function.arguments,
+                        },
+                    }
+                )
+
+            chunk = ModelResponseStream(
+                id=self.response_id or f"chatcmpl-recovered-{int(time.time())}",
+                object="chat.completion.chunk",
+                created=int(
+                    getattr(self, "_stream_created_time", time.time())
+                ),
+                model=self.model,
+                choices=[
+                    StreamingChoices(
+                        index=0,
+                        delta={
+                            "role": "assistant",
+                            "content": "",
+                            "tool_calls": sdk_tool_calls,
+                        },
+                        finish_reason="tool_calls",
+                    )
+                ],
+            )
+            return chunk
+        except Exception:
+            # If extraction fails for any reason, fall through to normal error handling
+            return None
 
     def _handle_stream_fallback_error(self, e: Exception) -> "NoReturn":
         """

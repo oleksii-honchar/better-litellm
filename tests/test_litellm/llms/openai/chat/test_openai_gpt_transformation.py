@@ -571,3 +571,112 @@ class TestGPT5ReasoningEffortPreservation:
 
         assert optional_params.get("temperature") == 0.5
         assert non_default_params.get("reasoning_effort") == "none"
+
+
+class TestLlamaCPPParseErrorRecovery:
+    """Tests for llama.cpp PEG parse error recovery.
+
+    When llama.cpp's autoparser builds a PEG parser from the Jinja2 chat template,
+    it may fail to parse tool calls if the model outputs them in a format different
+    from what the template specifies. For example, the Qwen template specifies
+    ```_ XML format but the model outputs JSON in ```_ tags.
+
+    The fix catches the 400 error from the server, extracts the tool calls from
+    the error message, and reconstructs the response.
+    """
+
+    def test_is_llamacpp_parse_error_returns_true_for_parse_error(self):
+        """Test that _is_llamacpp_parse_error identifies llama.cpp parse errors."""
+        error_msg = "Failed to parse input at pos 254: ```_\n{\"name\": \"test\"}\n_```"
+        assert OpenAIGPTConfig._is_llamacpp_parse_error(error_msg) is True
+
+    def test_is_llamacpp_parse_error_returns_false_for_other_errors(self):
+        """Test that _is_llamacpp_parse_error returns False for non-parse errors."""
+        error_msg = "Invalid request: missing required field"
+        assert OpenAIGPTConfig._is_llamacpp_parse_error(error_msg) is False
+
+        error_msg = "Rate limit exceeded"
+        assert OpenAIGPTConfig._is_llamacpp_parse_error(error_msg) is False
+
+        error_msg = "Failed to connect to server"
+        assert OpenAIGPTConfig._is_llamacpp_parse_error(error_msg) is False
+
+    def test_extract_tool_calls_from_json_format(self):
+        """Test extracting JSON tool calls from a llama.cpp parse error."""
+        error_msg = (
+            "Failed to parse input at pos 254: ```_\n"
+            '{"name": "get_weather", "arguments": {"location": "London"}}\n'
+            "_```"
+        )
+        tool_calls = OpenAIGPTConfig._extract_tool_calls_from_llamacpp_error(error_msg)
+        assert tool_calls is not None
+        assert len(tool_calls) == 1
+        assert tool_calls[0].id == "call_1"
+        assert tool_calls[0].type == "function"
+        assert tool_calls[0].function.name == "get_weather"
+        assert '"location":"London"' in tool_calls[0].function.arguments
+
+    def test_extract_tool_calls_from_qwen_xml_format(self):
+        """Test extracting Qwen XML tool calls from a llama.cpp parse error."""
+        error_msg = (
+            "Failed to parse input at pos 100: ```_\n"
+            "<function=get_weather><parameter=location>London</parameter></function>\n"
+            "_```"
+        )
+        tool_calls = OpenAIGPTConfig._extract_tool_calls_from_llamacpp_error(error_msg)
+        assert tool_calls is not None
+        assert len(tool_calls) == 1
+        assert tool_calls[0].id == "call_1"
+        assert tool_calls[0].type == "function"
+        assert tool_calls[0].function.name == "get_weather"
+        assert "London" in tool_calls[0].function.arguments
+
+    def test_extract_multiple_tool_calls(self):
+        """Test extracting multiple tool calls from a llama.cpp parse error."""
+        error_msg = (
+            "Failed to parse input at pos 100: ```_\n"
+            '{"name": "get_weather", "arguments": {"location": "London"}}\n'
+            "_```\n"
+            "```_\n"
+            '{"name": "send_email", "arguments": {"to": "user@example.com"}}\n'
+            "_```"
+        )
+        tool_calls = OpenAIGPTConfig._extract_tool_calls_from_llamacpp_error(error_msg)
+        assert tool_calls is not None
+        assert len(tool_calls) == 2
+        assert tool_calls[0].function.name == "get_weather"
+        assert tool_calls[1].function.name == "send_email"
+
+    def test_extract_tool_calls_returns_none_for_unparseable_error(self):
+        """Test that extraction returns None when no tool calls can be parsed."""
+        error_msg = (
+            "Failed to parse input at pos 100: Some random text without tool calls"
+        )
+        tool_calls = OpenAIGPTConfig._extract_tool_calls_from_llamacpp_error(error_msg)
+        assert tool_calls is None
+
+    def test_extract_tool_calls_with_none_arguments(self):
+        """Test extracting tool calls when arguments is None."""
+        error_msg = (
+            "Failed to parse input at pos 100: ```_\n"
+            '{"name": "ping", "arguments": null}\n'
+            "_```"
+        )
+        tool_calls = OpenAIGPTConfig._extract_tool_calls_from_llamacpp_error(error_msg)
+        assert tool_calls is not None
+        assert len(tool_calls) == 1
+        assert tool_calls[0].function.name == "ping"
+        assert tool_calls[0].function.arguments == "{}"
+
+    def test_extract_tool_calls_with_string_arguments(self):
+        """Test extracting tool calls when arguments is a string."""
+        error_msg = (
+            "Failed to parse input at pos 100: ```_\n"
+            '{"name": "search", "arguments": "{\\"query\\": \\"test\\"}"}\n'
+            "_```"
+        )
+        tool_calls = OpenAIGPTConfig._extract_tool_calls_from_llamacpp_error(error_msg)
+        assert tool_calls is not None
+        assert len(tool_calls) == 1
+        assert tool_calls[0].function.name == "search"
+        assert tool_calls[0].function.arguments == '{"query": "test"}'

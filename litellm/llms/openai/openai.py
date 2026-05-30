@@ -419,6 +419,54 @@ class OpenAIChatCompletion(BaseLLM, BaseOpenAILLM):
             )
             return client
 
+    def _reconstruct_chat_completion_response(
+        self,
+        tool_calls: List["ChatCompletionMessageToolCall"],
+        model: str,
+    ) -> Tuple[dict, "ChatCompletion"]:
+        """Reconstruct a ChatCompletion response from extracted tool calls.
+
+        Used when llama.cpp's PEG parser returns a 400 error with parseable tool calls.
+        """
+        from openai.types.chat import (
+            ChatCompletion,
+            ChatCompletionMessage,
+            ChatCompletionMessageToolCall,
+        )
+
+        # Convert litellm tool calls to OpenAI SDK format
+        sdk_tool_calls = []
+        for tc in tool_calls:
+            sdk_tc = ChatCompletionMessageToolCall(
+                id=tc.id,
+                type=tc.type,
+                function=tc.function.model_dump() if hasattr(tc.function, "model_dump") else tc.function,
+            )
+            sdk_tool_calls.append(sdk_tc)
+
+        message = ChatCompletionMessage(
+            content=None,
+            role="assistant",
+            tool_calls=sdk_tool_calls,
+        )
+
+        chat_completion = ChatCompletion(
+            id=f"chatcmpl-recovered-{int(time.time())}",
+            choices=[
+                {
+                    "finish_reason": "tool_calls",
+                    "index": 0,
+                    "message": message,
+                }
+            ],
+            created=int(time.time()),
+            model=model,
+            object="chat.completion",
+            usage=None,
+        )
+
+        return {}, chat_completion
+
     @track_llm_api_timing()
     async def make_openai_chat_completion_request(
         self,
@@ -431,6 +479,10 @@ class OpenAIChatCompletion(BaseLLM, BaseOpenAILLM):
         Helper to:
         - call chat.completions.create.with_raw_response when litellm.return_response_headers is True
         - call chat.completions.create by default
+
+        Also handles llama.cpp PEG parse errors (400) where the model outputs tool
+        calls in a format the PEG parser doesn't recognize. In that case, we extract
+        the tool calls from the error message and reconstruct the response.
         """
         start_time = time.time()
         try:
@@ -457,6 +509,23 @@ class OpenAIChatCompletion(BaseLLM, BaseOpenAILLM):
             time_delta = round(end_time - start_time, 2)
             e.message += f" - timeout value={timeout}, time taken={time_delta} seconds"
             raise e
+        except openai.BadRequestError as e:
+            # llama.cpp's PEG parser returns 400 when it can't parse tool calls
+            # from the model output. If the error contains the raw model output with
+            # ```_ tags, we can recover the tool calls and reconstruct the response.
+            from litellm.llms.openai.chat.gpt_transformation import OpenAIGPTConfig
+
+            error_message = str(e)
+            if OpenAIGPTConfig._is_llamacpp_parse_error(error_message):
+                tool_calls = OpenAIGPTConfig._extract_tool_calls_from_llamacpp_error(
+                    error_message
+                )
+                if tool_calls is not None:
+                    return self._reconstruct_chat_completion_response(
+                        tool_calls=tool_calls,
+                        model=data.get("model", "unknown"),
+                    )
+            raise e
         except Exception as e:
             raise e
 
@@ -472,6 +541,10 @@ class OpenAIChatCompletion(BaseLLM, BaseOpenAILLM):
         Helper to:
         - call chat.completions.create.with_raw_response when litellm.return_response_headers is True
         - call chat.completions.create by default
+
+        Also handles llama.cpp PEG parse errors (400) where the model outputs tool
+        calls in a format the PEG parser doesn't recognize. In that case, we extract
+        the tool calls from the error message and reconstruct the response.
         """
         raw_response = None
         try:
@@ -490,6 +563,23 @@ class OpenAIChatCompletion(BaseLLM, BaseOpenAILLM):
                     message=f"Empty or invalid response from LLM endpoint. Received: {response!r}. Check the reverse proxy or model server configuration.",
                 )
             return headers, response
+        except openai.BadRequestError as e:
+            # llama.cpp's PEG parser returns 400 when it can't parse tool calls
+            # from the model output. If the error contains the raw model output with
+            # ```_ tags, we can recover the tool calls and reconstruct the response.
+            from litellm.llms.openai.chat.gpt_transformation import OpenAIGPTConfig
+
+            error_message = str(e)
+            if OpenAIGPTConfig._is_llamacpp_parse_error(error_message):
+                tool_calls = OpenAIGPTConfig._extract_tool_calls_from_llamacpp_error(
+                    error_message
+                )
+                if tool_calls is not None:
+                    return self._reconstruct_chat_completion_response(
+                        tool_calls=tool_calls,
+                        model=data.get("model", "unknown"),
+                    )
+            raise e
         except OpenAIError:
             raise
         except Exception as e:

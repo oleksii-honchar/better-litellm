@@ -608,6 +608,73 @@ class OpenAIGPTConfig(BaseLLMModelInfo, BaseConfig):
         except (json.JSONDecodeError, TypeError):
             return None
 
+    @staticmethod
+    def _is_llamacpp_parse_error(message: str) -> bool:
+        """Check if the error message is from llama.cpp's PEG parser failing to parse tool calls.
+
+        llama.cpp builds a PEG parser from the Jinja2 chat template. When the model outputs
+        tool calls in a format the PEG parser doesn't recognize (e.g., JSON in ```_ tags
+        instead of Qwen XML), it returns a 400 with "Failed to parse input at pos N: ...".
+        """
+        return "Failed to parse input at pos" in message
+
+    @staticmethod
+    def _extract_tool_calls_from_llamacpp_error(
+        error_message: str,
+    ) -> Optional[List[ChatCompletionMessageToolCall]]:
+        """Extract tool calls from a llama.cpp PEG parse error message.
+
+        The error format is: 'Failed to parse input at pos N: ```_\\n{...}\\n_```...'
+        The content after the colon contains the raw model output with ```_ tags.
+        We use the existing extraction logic to parse the tool calls from that content.
+        """
+        import re
+
+        # Extract the raw model output from the error message
+        # Format: "Failed to parse input at pos N: <raw_output>"
+        match = re.search(r"Failed to parse input at pos \d+:\s*(.*)", error_message, re.DOTALL)
+        if not match:
+            return None
+
+        raw_output = match.group(1).strip()
+        tool_calls = []
+
+        # Try Qwen XML format first
+        for xml_match in re.finditer(
+            r'```_\s*(<function=\S+?>.*?</function>)\s*_```', raw_output, re.DOTALL
+        ):
+            xml_content = xml_match.group(1)
+            tool_call = OpenAIGPTConfig._parse_qwen_xml_to_tool_call(xml_content)
+            if tool_call:
+                tc_with_id = ChatCompletionMessageToolCall(
+                    id=f"call_{len(tool_calls) + 1}",
+                    type="function",
+                    function=Function(
+                        name=tool_call.function.name,
+                        arguments=tool_call.function.arguments,
+                    ),
+                )
+                tool_calls.append(tc_with_id)
+
+        # Try JSON format in ```_ tags
+        for json_match in re.finditer(
+            r'```_\s*(\{.*?\})\s*_```', raw_output, re.DOTALL
+        ):
+            json_content = json_match.group(1)
+            tool_call = OpenAIGPTConfig._parse_json_to_tool_call(json_content)
+            if tool_call:
+                tc_with_id = ChatCompletionMessageToolCall(
+                    id=f"call_{len(tool_calls) + 1}",
+                    type="function",
+                    function=Function(
+                        name=tool_call.function.name,
+                        arguments=tool_call.function.arguments,
+                    ),
+                )
+                tool_calls.append(tc_with_id)
+
+        return tool_calls if tool_calls else None
+
     def _get_finish_reason(self, message: Message, received_finish_reason: str) -> str:
         if message.tool_calls is not None:
             return "tool_calls"

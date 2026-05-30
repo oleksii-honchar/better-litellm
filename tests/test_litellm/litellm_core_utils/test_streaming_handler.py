@@ -2124,3 +2124,207 @@ def test_gemini_legacy_vertex_tool_calls_finish_reason_with_stop_enum():
         f"Expected 'tool_calls' but got {final.choices[0].finish_reason!r}. "
         "STOP enum was not normalised through map_finish_reason()."
     )
+
+
+# ─── llama.cpp PEG parse error recovery during streaming ──────────────
+
+LLAMACPP_PARSE_ERROR_MSG = (
+    "Failed to parse input at pos 254: ```_\n"
+    '{"name": "get_weather", "arguments": {"location": "London"}}\n'
+    "_```"
+)
+
+LLAMACPP_PARSE_ERROR_MSG_QWEN_XML = (
+    "Failed to parse input at pos 100: ```_\n"
+    "<function=get_weather><parameter=location>London</parameter></function>\n"
+    "_```"
+)
+
+LLAMACPP_PARSE_ERROR_NO_TOOL_CALLS = (
+    "Failed to parse input at pos 100: Some random text without tool calls"
+)
+
+
+@pytest.mark.asyncio
+async def test_async_streaming_llamacpp_parse_error_recovers_tool_calls(
+    logging_obj: Logging,
+):
+    """When a llama.cpp PEG parse error occurs during async streaming,
+    the streaming handler recovers the tool calls from the error message
+    and yields a reconstructed chunk with finish_reason='tool_calls'."""
+
+    async def _raise_parse_error(**kwargs):
+        raise ValueError(LLAMACPP_PARSE_ERROR_MSG)
+
+    wrapper = CustomStreamWrapper(
+        completion_stream=None,
+        model="llama.cpp/qwopus3.6",
+        logging_obj=logging_obj,
+        custom_llm_provider="openai",
+        make_call=_raise_parse_error,
+    )
+
+    chunk = await wrapper.__anext__()
+
+    assert chunk is not None
+    assert chunk.object == "chat.completion.chunk"
+    assert chunk.model == "llama.cpp/qwopus3.6"
+    choice = chunk.choices[0]
+    assert choice.finish_reason == "tool_calls"
+    delta = choice.delta
+    assert delta.get("role") == "assistant"
+    assert delta.get("content") == ""
+    tool_calls = delta.get("tool_calls")
+    assert tool_calls is not None
+    assert len(tool_calls) == 1
+    assert tool_calls[0]["id"] == "call_1"
+    assert tool_calls[0]["type"] == "function"
+    assert tool_calls[0]["function"]["name"] == "get_weather"
+    assert "location" in tool_calls[0]["function"]["arguments"]
+    assert "London" in tool_calls[0]["function"]["arguments"]
+
+
+@pytest.mark.asyncio
+async def test_async_streaming_llamacpp_parse_error_qwen_xml_recovers_tool_calls(
+    logging_obj: Logging,
+):
+    """Same as above but with Qwen XML format tool calls."""
+
+    async def _raise_parse_error(**kwargs):
+        raise ValueError(LLAMACPP_PARSE_ERROR_MSG_QWEN_XML)
+
+    wrapper = CustomStreamWrapper(
+        completion_stream=None,
+        model="llama.cpp/qwopus3.6",
+        logging_obj=logging_obj,
+        custom_llm_provider="openai",
+        make_call=_raise_parse_error,
+    )
+
+    chunk = await wrapper.__anext__()
+
+    assert chunk is not None
+    choice = chunk.choices[0]
+    assert choice.finish_reason == "tool_calls"
+    tool_calls = choice.delta.get("tool_calls")
+    assert tool_calls is not None
+    assert len(tool_calls) == 1
+    assert tool_calls[0]["function"]["name"] == "get_weather"
+    assert "London" in tool_calls[0]["function"]["arguments"]
+
+
+@pytest.mark.asyncio
+async def test_async_streaming_llamacpp_parse_error_no_tool_calls_falls_through(
+    logging_obj: Logging,
+):
+    """When a llama.cpp parse error contains no extractable tool calls,
+    the error falls through to normal error handling (MidStreamFallbackError)."""
+    from litellm.exceptions import MidStreamFallbackError
+
+    async def _raise_parse_error(**kwargs):
+        raise ValueError(LLAMACPP_PARSE_ERROR_NO_TOOL_CALLS)
+
+    wrapper = CustomStreamWrapper(
+        completion_stream=None,
+        model="llama.cpp/qwopus3.6",
+        logging_obj=logging_obj,
+        custom_llm_provider="openai",
+        make_call=_raise_parse_error,
+    )
+
+    with pytest.raises(MidStreamFallbackError):
+        await wrapper.__anext__()
+
+
+@pytest.mark.asyncio
+async def test_async_streaming_non_parse_error_raises_normally(
+    logging_obj: Logging,
+):
+    """A non-llama.cpp parse error during streaming still raises normally
+    (MidStreamFallbackError for transient errors)."""
+    from litellm.exceptions import MidStreamFallbackError
+
+    async def _raise_connection_error(**kwargs):
+        raise ConnectionError("Server not reachable")
+
+    wrapper = CustomStreamWrapper(
+        completion_stream=None,
+        model="llama.cpp/qwopus3.6",
+        logging_obj=logging_obj,
+        custom_llm_provider="openai",
+        make_call=_raise_connection_error,
+    )
+
+    with pytest.raises(MidStreamFallbackError):
+        await wrapper.__anext__()
+
+
+def test_sync_streaming_llamacpp_parse_error_recovers_tool_calls(
+    logging_obj: Logging,
+):
+    """Sync streaming: llama.cpp PEG parse error recovers tool calls."""
+
+    def _raise_parse_error(**kwargs):
+        raise ValueError(LLAMACPP_PARSE_ERROR_MSG)
+
+    wrapper = CustomStreamWrapper(
+        completion_stream=None,
+        model="llama.cpp/qwopus3.6",
+        logging_obj=logging_obj,
+        custom_llm_provider="openai",
+        make_call=_raise_parse_error,
+    )
+
+    chunk = next(wrapper)
+
+    assert chunk is not None
+    assert chunk.object == "chat.completion.chunk"
+    choice = chunk.choices[0]
+    assert choice.finish_reason == "tool_calls"
+    tool_calls = choice.delta.get("tool_calls")
+    assert tool_calls is not None
+    assert len(tool_calls) == 1
+    assert tool_calls[0]["function"]["name"] == "get_weather"
+    assert "London" in tool_calls[0]["function"]["arguments"]
+
+
+def test_sync_streaming_llamacpp_parse_error_no_tool_calls_falls_through(
+    logging_obj: Logging,
+):
+    """Sync streaming: parse error with no tool calls falls through."""
+    from litellm.exceptions import MidStreamFallbackError
+
+    def _raise_parse_error(**kwargs):
+        raise ValueError(LLAMACPP_PARSE_ERROR_NO_TOOL_CALLS)
+
+    wrapper = CustomStreamWrapper(
+        completion_stream=None,
+        model="llama.cpp/qwopus3.6",
+        logging_obj=logging_obj,
+        custom_llm_provider="openai",
+        make_call=_raise_parse_error,
+    )
+
+    with pytest.raises(MidStreamFallbackError):
+        next(wrapper)
+
+
+def test_sync_streaming_non_parse_error_raises_normally(
+    logging_obj: Logging,
+):
+    """Sync streaming: non-parse error raises normally."""
+    from litellm.exceptions import MidStreamFallbackError
+
+    def _raise_connection_error(**kwargs):
+        raise ConnectionError("Server not reachable")
+
+    wrapper = CustomStreamWrapper(
+        completion_stream=None,
+        model="llama.cpp/qwopus3.6",
+        logging_obj=logging_obj,
+        custom_llm_provider="openai",
+        make_call=_raise_connection_error,
+    )
+
+    with pytest.raises(MidStreamFallbackError):
+        next(wrapper)
