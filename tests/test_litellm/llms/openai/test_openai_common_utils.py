@@ -175,3 +175,193 @@ def test_get_openai_client_cache_key(client_type):
     )
     assert isinstance(key, str)
     assert "api_key=sk-test" in key
+
+
+class TestLlamaCPPParseErrorRecoveryIntegration:
+    """Integration tests for llama.cpp PEG parse error recovery in OpenAI handler.
+
+    When llama.cpp returns a 400 with "Failed to parse input at pos" due to the model
+    outputting tool calls in a format the PEG parser doesn't recognize, the OpenAI
+    handler should recover the tool calls from the error message and reconstruct
+    the response.
+    """
+
+    def test_reconstruct_response_method_exists(self):
+        """Test that _reconstruct_chat_completion_response returns a valid response."""
+        from litellm.llms.openai.openai import OpenAIChatCompletion
+        from litellm.types.utils import ChatCompletionMessageToolCall, Function
+
+        handler = OpenAIChatCompletion()
+
+        tool_calls = [
+            ChatCompletionMessageToolCall(
+                id="call_1",
+                type="function",
+                function=Function(name="get_weather", arguments='{"location":"London"}'),
+            )
+        ]
+
+        headers, response = handler._reconstruct_chat_completion_response(
+            tool_calls=tool_calls,
+            model="qwopus3.6-27b",
+        )
+
+        assert headers == {}
+        assert hasattr(response, "model_dump")
+        dump = response.model_dump()
+        assert dump["model"] == "qwopus3.6-27b"
+        assert dump["object"] == "chat.completion"
+        assert len(dump["choices"]) == 1
+        assert dump["choices"][0]["finish_reason"] == "tool_calls"
+        assert dump["choices"][0]["message"]["role"] == "assistant"
+        assert dump["choices"][0]["message"]["content"] is None
+        assert len(dump["choices"][0]["message"]["tool_calls"]) == 1
+        assert dump["choices"][0]["message"]["tool_calls"][0]["function"]["name"] == "get_weather"
+
+    @pytest.mark.asyncio
+    async def test_async_recovery_from_llamacpp_parse_error(self):
+        """Test that make_openai_chat_completion_request recovers from llama.cpp parse error."""
+        from openai import BadRequestError
+
+        from litellm.llms.openai.openai import OpenAIChatCompletion
+
+        handler = OpenAIChatCompletion()
+
+        # Create a mock BadRequestError with the llama.cpp parse error message
+        error_msg = (
+            "Failed to parse input at pos 254: ```_\n"
+            '{"name": "get_weather", "arguments": {"location": "London"}}\n'
+            "_```"
+        )
+        mock_error = BadRequestError(
+            message=error_msg,
+            response=MagicMock(),
+            body=None,
+        )
+
+        mock_client = MagicMock()
+        mock_client.chat.completions.with_raw_response.create = MagicMock(
+            side_effect=mock_error
+        )
+
+        logging_obj = MagicMock()
+        data = {"model": "qwopus3.6-27b", "messages": []}
+
+        headers, response = await handler.make_openai_chat_completion_request(
+            openai_aclient=mock_client,
+            data=data,
+            timeout=30.0,
+            logging_obj=logging_obj,
+        )
+
+        # Verify recovery worked
+        assert headers == {}
+        assert hasattr(response, "model_dump")
+        dump = response.model_dump()
+        assert dump["model"] == "qwopus3.6-27b"
+        assert len(dump["choices"]) == 1
+        assert dump["choices"][0]["finish_reason"] == "tool_calls"
+        assert dump["choices"][0]["message"]["tool_calls"][0]["function"]["name"] == "get_weather"
+
+    def test_sync_recovery_from_llamacpp_parse_error(self):
+        """Test that make_sync_openai_chat_completion_request recovers from llama.cpp parse error."""
+        from openai import BadRequestError
+
+        from litellm.llms.openai.openai import OpenAIChatCompletion
+
+        handler = OpenAIChatCompletion()
+
+        error_msg = (
+            "Failed to parse input at pos 254: ```_\n"
+            '{"name": "get_weather", "arguments": {"location": "London"}}\n'
+            "_```"
+        )
+        mock_error = BadRequestError(
+            message=error_msg,
+            response=MagicMock(),
+            body=None,
+        )
+
+        mock_client = MagicMock()
+        mock_client.chat.completions.with_raw_response.create = MagicMock(
+            side_effect=mock_error
+        )
+
+        logging_obj = MagicMock()
+        data = {"model": "qwopus3.6-27b", "messages": []}
+
+        headers, response = handler.make_sync_openai_chat_completion_request(
+            openai_client=mock_client,
+            data=data,
+            timeout=30.0,
+            logging_obj=logging_obj,
+        )
+
+        assert headers == {}
+        dump = response.model_dump()
+        assert dump["model"] == "qwopus3.6-27b"
+        assert dump["choices"][0]["message"]["tool_calls"][0]["function"]["name"] == "get_weather"
+
+    @pytest.mark.asyncio
+    async def test_async_non_parse_error_not_caught(self):
+        """Test that non-parse 400 errors are re-raised."""
+        from openai import BadRequestError
+
+        from litellm.llms.openai.openai import OpenAIChatCompletion
+
+        handler = OpenAIChatCompletion()
+
+        mock_error = BadRequestError(
+            message="Invalid request: missing required field",
+            response=MagicMock(),
+            body=None,
+        )
+
+        mock_client = MagicMock()
+        mock_client.chat.completions.with_raw_response.create = MagicMock(
+            side_effect=mock_error
+        )
+
+        logging_obj = MagicMock()
+        data = {"model": "qwopus3.6-27b", "messages": []}
+
+        with pytest.raises(BadRequestError, match="Invalid request"):
+            await handler.make_openai_chat_completion_request(
+                openai_aclient=mock_client,
+                data=data,
+                timeout=30.0,
+                logging_obj=logging_obj,
+            )
+
+    @pytest.mark.asyncio
+    async def test_async_parse_error_no_tool_calls_re_raises(self):
+        """Test that parse error with no extractable tool calls is re-raised."""
+        from openai import BadRequestError
+
+        from litellm.llms.openai.openai import OpenAIChatCompletion
+
+        handler = OpenAIChatCompletion()
+
+        # Parse error but no tool calls in the content
+        error_msg = "Failed to parse input at pos 100: Some random text"
+        mock_error = BadRequestError(
+            message=error_msg,
+            response=MagicMock(),
+            body=None,
+        )
+
+        mock_client = MagicMock()
+        mock_client.chat.completions.with_raw_response.create = MagicMock(
+            side_effect=mock_error
+        )
+
+        logging_obj = MagicMock()
+        data = {"model": "qwopus3.6-27b", "messages": []}
+
+        with pytest.raises(BadRequestError, match="Failed to parse input"):
+            await handler.make_openai_chat_completion_request(
+                openai_aclient=mock_client,
+                data=data,
+                timeout=30.0,
+                logging_obj=logging_obj,
+            )

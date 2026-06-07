@@ -495,13 +495,73 @@ class OpenAIGPTConfig(BaseLLMModelInfo, BaseConfig):
         self, content: str, optional_params: dict
     ) -> Optional[ChatCompletionMessageToolCall]:
         """
-        Check if the content is a tool call
+        Check if the content is a tool call.
+
+        Tries:
+        1. Qwen XML format in `` tags with <function>/<parameter> XML
+        2. JSON format inside `` tags ({"name":..., "arguments":...})
+        3. Qwen XML in <tool_call> tags (Qwen format wrapper)
+        4. Qwen XML in <![CDATA[...]]> tags (Anthropic-style)
+        5. JSON in <tool_call> tags (opencode-style or OpenAI-style tool calls)
+        6. Pure JSON format (backward compatibility)
         """
         import json
 
         if not self._passed_in_tools(optional_params):
             return None
         tool_call_names = get_tool_call_names(optional_params.get("tools", []))
+
+        # 1) Try Qwen XML format in ```_ tags
+        try:
+            xml_content = self._extract_xml_from_tool_call_tags(content)
+            if xml_content:
+                tool_call = self._parse_qwen_xml_to_tool_call(xml_content)
+                if tool_call and tool_call.function.name in tool_call_names:
+                    return tool_call
+        except Exception:
+            pass
+
+        # 2) Try JSON format inside ```_ tags
+        try:
+            json_content = self._extract_json_from_tool_call_tags(content)
+            if json_content:
+                tool_call = self._parse_json_to_tool_call(json_content)
+                if tool_call and tool_call.function.name in tool_call_names:
+                    return tool_call
+        except Exception:
+            pass
+
+        # 3) Try Qwen XML format in <tool_call> tags
+        try:
+            wrapper_xml = self._extract_xml_from_tool_call_wrapper_tags(content)
+            if wrapper_xml:
+                tool_call = self._parse_qwen_xml_to_tool_call(wrapper_xml)
+                if tool_call and tool_call.function.name in tool_call_names:
+                    return tool_call
+        except Exception:
+            pass
+
+        # 4) Try Qwen XML format in <![CDATA[...]]> tags
+        try:
+            cdata_xml = self._extract_xml_from_cdata_tags(content)
+            if cdata_xml:
+                tool_call = self._parse_qwen_xml_to_tool_call(cdata_xml)
+                if tool_call and tool_call.function.name in tool_call_names:
+                    return tool_call
+        except Exception:
+            pass
+
+        # 5) Try JSON format in <tool_call> tags (opencode-style or OpenAI-style)
+        try:
+            json_wrapper = self._extract_json_from_tool_call_wrapper_tags(content)
+            if json_wrapper:
+                tool_call = self._parse_opencode_json_to_tool_call(json_wrapper)
+                if tool_call and tool_call.function.name in tool_call_names:
+                    return tool_call
+        except Exception:
+            pass
+
+        # 6) Fall back to pure JSON format (backward compatibility)
         try:
             json_content = json.loads(content)
             if (
@@ -518,6 +578,298 @@ class OpenAIGPTConfig(BaseLLMModelInfo, BaseConfig):
             return None
 
         return None
+
+    @staticmethod
+    def _extract_xml_from_tool_call_tags(content: str) -> Optional[str]:
+        import re
+        for match in re.finditer(r'```_\s*(.*?)\s*_```', content, re.DOTALL):
+            xml_content = match.group(1).strip()
+            if xml_content.startswith("<function="):
+                return xml_content
+        return None
+
+    @staticmethod
+    def _extract_json_from_tool_call_tags(content: str) -> Optional[str]:
+        import re
+        match = re.search(r'```_\s*(.*?)\s*_```', content, re.DOTALL)
+        if match:
+            json_content = match.group(1).strip()
+            if json_content.startswith("{"):
+                return json_content
+        return None
+
+    @staticmethod
+    def _extract_xml_from_cdata_tags(content: str) -> Optional[str]:
+        """Extract Qwen XML tool call from <![CDATA[...]]> tags.
+
+        Anthropic-style CDATA-wrapped Qwen XML:
+        <![CDATA[<function=grep><parameter=pattern>...</parameter></function>]]>
+        """
+        import re
+        for match in re.finditer(
+            r'<!\[CDATA\[(<function=\S+?>.*?</function>)\]\]>', content, re.DOTALL
+        ):
+            xml_content = match.group(1).strip()
+            if xml_content.startswith("<function="):
+                return xml_content
+        return None
+
+    @staticmethod
+    def _extract_xml_from_tool_call_wrapper_tags(content: str) -> Optional[str]:
+        """Extract Qwen XML tool call from <tool_call> wrapper tags.
+
+        Qwen format with <tool_call> wrapper:
+        <tool_call>
+        <function=grep>
+        <parameter=path>...</parameter>
+        </function>
+        </tool_call>
+        """
+        import re
+        for match in re.finditer(
+            r'<tool_call[^>]*>\s*(<function=\S+?>.*?</function>)\s*</tool_call>',
+            content,
+            re.DOTALL,
+        ):
+            xml_content = match.group(1).strip()
+            if xml_content.startswith("<function="):
+                return xml_content
+        return None
+
+    @staticmethod
+    def _extract_json_from_tool_call_wrapper_tags(content: str) -> Optional[str]:
+        """Extract JSON tool call from <tool_call> wrapper tags.
+
+        opencode format with <tool_call> wrapper:
+        <tool_call>
+        {"type": "bash", "command": "ls"}
+        _</tool_call>
+
+        Or OpenAI-style:
+        <tool_call>
+        {"name": "bash", "arguments": {"command": "ls"}}
+        _</tool_call>
+        """
+        import re
+        for match in re.finditer(
+            r'<tool_call[^>]*>\s*(\{.*?\})\s*</tool_call>',
+            content,
+            re.DOTALL,
+        ):
+            json_content = match.group(1).strip()
+            if json_content.startswith("{"):
+                return json_content
+        return None
+
+    @staticmethod
+    def _parse_opencode_json_to_tool_call(json_content: str) -> Optional[ChatCompletionMessageToolCall]:
+        import json
+        try:
+            parsed = json.loads(json_content)
+            # opencode uses "type" for tool name, OpenAI uses "name"
+            tool_name = parsed.get("type") or parsed.get("name")
+            if not tool_name:
+                return None
+            # If OpenAI-style with "arguments" key
+            arguments = parsed.get("arguments")
+            if arguments is not None:
+                if isinstance(arguments, dict):
+                    arguments = json.dumps(arguments, separators=(",", ":"))
+                elif isinstance(arguments, str):
+                    pass
+                else:
+                    arguments = json.dumps(arguments, separators=(",", ":"))
+            else:
+                # opencode-style: all non-"type"/"name" keys are arguments
+                arguments = {
+                    k: v for k, v in parsed.items()
+                    if k not in ("type", "name")
+                }
+                arguments = json.dumps(arguments, separators=(",", ":"))
+            return ChatCompletionMessageToolCall(
+                function=Function(name=tool_name, arguments=arguments)
+            )
+        except (json.JSONDecodeError, TypeError):
+            return None
+
+    @staticmethod
+    def _parse_qwen_xml_to_tool_call(xml_content: str) -> Optional[ChatCompletionMessageToolCall]:
+        import json, re
+        func_match = re.match(r"<function=(\S+?)>", xml_content)
+        if not func_match:
+            return None
+        func_name = func_match.group(1)
+        arguments = {}
+        for param_match in re.finditer(r"<parameter=([^>]+)>(.*?)</parameter>", xml_content, re.DOTALL):
+            param_name = param_match.group(1)
+            param_value = param_match.group(2).strip()
+            try:
+                param_value = json.loads(param_value)
+            except (json.JSONDecodeError, TypeError):
+                pass
+            arguments[param_name] = param_value
+        return ChatCompletionMessageToolCall(
+            function=Function(name=func_name, arguments=json.dumps(arguments, separators=(",", ":")))
+        )
+
+    @staticmethod
+    def _parse_json_to_tool_call(json_content: str) -> Optional[ChatCompletionMessageToolCall]:
+        import json
+        try:
+            parsed = json.loads(json_content)
+            func_name = parsed.get("name")
+            arguments = parsed.get("arguments")
+            if not func_name:
+                return None
+            if isinstance(arguments, dict):
+                arguments = json.dumps(arguments, separators=(",", ":"))
+            elif isinstance(arguments, str):
+                pass
+            elif arguments is None:
+                arguments = "{}"
+            else:
+                arguments = json.dumps(arguments, separators=(",", ":"))
+            return ChatCompletionMessageToolCall(
+                function=Function(name=func_name, arguments=arguments)
+            )
+        except (json.JSONDecodeError, TypeError):
+            return None
+
+    @staticmethod
+    def _is_llamacpp_parse_error(message: str) -> bool:
+        """Check if the error message is from llama.cpp's PEG parser failing to parse tool calls.
+
+        llama.cpp builds a PEG parser from the Jinja2 chat template. When the model outputs
+        tool calls in a format the PEG parser doesn't recognize (e.g., JSON in ```_ tags
+        instead of Qwen XML), it returns a 400 with "Failed to parse input at pos N: ...".
+        """
+        return "Failed to parse input at pos" in message
+
+    @staticmethod
+    def _extract_tool_calls_from_llamacpp_error(
+        error_message: str,
+    ) -> Optional[List[ChatCompletionMessageToolCall]]:
+        """Extract tool calls from a llama.cpp PEG parse error message.
+
+        The error format is: 'Failed to parse input at pos N: <raw_output>'
+        The raw output may contain:
+        - ```_ ... ``` tags (Qwen XML or JSON)
+        - <tool_call>...</tool_call> tags (Qwen format wrapper — XML or JSON)
+        - <![CDATA[<function=...>]]> tags (Anthropic-style CDATA wrapped Qwen XML)
+        We try all formats to parse the tool calls.
+        """
+        import re
+
+        # Extract the raw model output from the error message
+        # Format: "Failed to parse input at pos N: <raw_output>"
+        match = re.search(r"Failed to parse input at pos \d+:\s*(.*)", error_message, re.DOTALL)
+        if not match:
+            return None
+
+        raw_output = match.group(1).strip()
+        tool_calls = []
+
+        # Try Qwen XML format in ```_ tags
+        for xml_match in re.finditer(
+            r'```_\s*(<function=\S+?>.*?</function>)\s*_```', raw_output, re.DOTALL
+        ):
+            xml_content = xml_match.group(1)
+            tool_call = OpenAIGPTConfig._parse_qwen_xml_to_tool_call(xml_content)
+            if tool_call:
+                tc_with_id = ChatCompletionMessageToolCall(
+                    id=f"call_{len(tool_calls) + 1}",
+                    type="function",
+                    function=Function(
+                        name=tool_call.function.name,
+                        arguments=tool_call.function.arguments,
+                    ),
+                )
+                tool_calls.append(tc_with_id)
+
+        # Try JSON format in ```_ tags
+        for json_match in re.finditer(
+            r'```_\s*(\{.*?\})\s*_```', raw_output, re.DOTALL
+        ):
+            json_content = json_match.group(1)
+            tool_call = OpenAIGPTConfig._parse_json_to_tool_call(json_content)
+            if tool_call:
+                tc_with_id = ChatCompletionMessageToolCall(
+                    id=f"call_{len(tool_calls) + 1}",
+                    type="function",
+                    function=Function(
+                        name=tool_call.function.name,
+                        arguments=tool_call.function.arguments,
+                    ),
+                )
+                tool_calls.append(tc_with_id)
+
+        # Try Qwen XML format in <tool_call> tags
+        for wrapper_match in re.finditer(
+            r'<tool_call[^>]*>\s*(<function=\S+?>.*?</function>)\s*</tool_call>',
+            raw_output,
+            re.DOTALL,
+        ):
+            xml_content = wrapper_match.group(1)
+            tool_call = OpenAIGPTConfig._parse_qwen_xml_to_tool_call(xml_content)
+            if tool_call:
+                tc_with_id = ChatCompletionMessageToolCall(
+                    id=f"call_{len(tool_calls) + 1}",
+                    type="function",
+                    function=Function(
+                        name=tool_call.function.name,
+                        arguments=tool_call.function.arguments,
+                    ),
+                )
+                tool_calls.append(tc_with_id)
+
+        # Try Qwen XML format in <![CDATA[...]]> tags
+        for cdata_match in re.finditer(
+            r'<!\[CDATA\[(<function=\S+?>.*?</function>)\]\]>', raw_output, re.DOTALL
+        ):
+            xml_content = cdata_match.group(1)
+            tool_call = OpenAIGPTConfig._parse_qwen_xml_to_tool_call(xml_content)
+            if tool_call:
+                tc_with_id = ChatCompletionMessageToolCall(
+                    id=f"call_{len(tool_calls) + 1}",
+                    type="function",
+                    function=Function(
+                        name=tool_call.function.name,
+                        arguments=tool_call.function.arguments,
+                    ),
+                )
+                tool_calls.append(tc_with_id)
+
+        # Try JSON format in <tool_call> tags (opencode-style or OpenAI-style tool calls)
+        for json_match in re.finditer(
+            r'<tool_call[^>]*>\s*(\{.*?\})\s*</tool_call>',
+            raw_output,
+            re.DOTALL,
+        ):
+            json_content = json_match.group(1)
+            try:
+                parsed = json.loads(json_content)
+                # opencode uses "type" for tool name, OpenAI uses "name"
+                tool_name = parsed.get("type") or parsed.get("name")
+                if not tool_name:
+                    continue
+                # Build arguments from remaining keys
+                arguments = {
+                    k: v for k, v in parsed.items()
+                    if k not in ("type", "name")
+                }
+                tc_with_id = ChatCompletionMessageToolCall(
+                    id=f"call_{len(tool_calls) + 1}",
+                    type="function",
+                    function=Function(
+                        name=str(tool_name),
+                        arguments=json.dumps(arguments, separators=(",", ":")),
+                    ),
+                )
+                tool_calls.append(tc_with_id)
+            except (json.JSONDecodeError, TypeError):
+                pass
+
+        return tool_calls if tool_calls else None
 
     def _get_finish_reason(self, message: Message, received_finish_reason: str) -> str:
         if message.tool_calls is not None:
@@ -788,6 +1140,10 @@ class OpenAIGPTConfig(BaseLLMModelInfo, BaseConfig):
 
 
 class OpenAIChatCompletionStreamingHandler(BaseModelResponseIterator):
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self._tool_call_buffer = ""
+
     def _map_reasoning_to_reasoning_content(self, choices: list) -> list:
         """
         Map 'reasoning' field to 'reasoning_content' field in delta.
@@ -812,6 +1168,42 @@ class OpenAIChatCompletionStreamingHandler(BaseModelResponseIterator):
             choices = chunk.get("choices", [])
             choices = self._map_reasoning_to_reasoning_content(choices)
 
+            for choice in choices:
+                delta = choice.get("delta", {})
+                content = delta.get("content", "")
+                role = delta.get("role")
+
+                # Reset buffer on new message
+                if role is not None:
+                    self._tool_call_buffer = ""
+
+                # Skip if no content
+                if content is None or content == "":
+                    continue
+
+                # Check for tool calls in buffer
+                if self._tool_call_buffer:
+                    self._tool_call_buffer += content
+                    extracted_tc, tool_calls = self._extract_tool_calls_from_buffer()
+                    if tool_calls:
+                        # Set content to empty and add tool_calls
+                        delta["content"] = ""
+                        delta["tool_calls"] = tool_calls
+                        choice["delta"] = delta
+                        self._tool_call_buffer = extracted_tc
+                        break
+
+                # Check if content starts a tool call tag
+                if "```_" in content or "<tool_call>" in content or self._tool_call_buffer:
+                    self._tool_call_buffer = (self._tool_call_buffer + content) if self._tool_call_buffer else content
+                    extracted_tc, tool_calls = self._extract_tool_calls_from_buffer()
+                    if tool_calls:
+                        delta["content"] = ""
+                        delta["tool_calls"] = tool_calls
+                        choice["delta"] = delta
+                        self._tool_call_buffer = extracted_tc
+                        break
+
             kwargs: Dict[str, Any] = {
                 "id": chunk.get("id"),
                 "object": "chat.completion.chunk",
@@ -824,3 +1216,91 @@ class OpenAIChatCompletionStreamingHandler(BaseModelResponseIterator):
             return ModelResponseStream(**kwargs)
         except Exception as e:
             raise e
+
+    def _extract_tool_calls_from_buffer(self):
+        import json, re
+        tool_calls = []
+        remaining = self._tool_call_buffer
+
+        # Qwen XML pattern in ```_ tags
+        xml_pattern = re.compile(chr(96)*3 + r'_\s*(<function=\S+?>.*?</function>)\s*_' + chr(96)*3, re.DOTALL)
+        for match in reversed(list(xml_pattern.finditer(remaining))):
+            xml_content = match.group(1)
+            tool_call = OpenAIGPTConfig._parse_qwen_xml_to_tool_call(xml_content)
+            if tool_call:
+                tc_with_id = ChatCompletionMessageToolCall(
+                    id=f"call_{len(tool_calls) + 1}",
+                    type="function",
+                    function=Function(name=tool_call.function.name, arguments=tool_call.function.arguments),
+                )
+                tool_calls.append(tc_with_id)
+            remaining = remaining[:match.start()] + remaining[match.end():]
+
+        # JSON pattern in ```_ tags
+        json_pattern = re.compile(chr(96)*3 + r'_\s*(\{.*?\})\s*_' + chr(96)*3, re.DOTALL)
+        for match in reversed(list(json_pattern.finditer(remaining))):
+            json_content = match.group(1)
+            tool_call = OpenAIGPTConfig._parse_json_to_tool_call(json_content)
+            if tool_call:
+                tc_with_id = ChatCompletionMessageToolCall(
+                    id=f"call_{len(tool_calls) + 1}",
+                    type="function",
+                    function=Function(name=tool_call.function.name, arguments=tool_call.function.arguments),
+                )
+                tool_calls.append(tc_with_id)
+            remaining = remaining[:match.start()] + remaining[match.end():]
+
+        # Qwen XML pattern in <tool_call> tags
+        wrapper_pattern = re.compile(r'<tool_call[^>]*>\s*(<function=\S+?>.*?</function>)\s*</tool_call>', re.DOTALL)
+        for match in reversed(list(wrapper_pattern.finditer(remaining))):
+            xml_content = match.group(1)
+            tool_call = OpenAIGPTConfig._parse_qwen_xml_to_tool_call(xml_content)
+            if tool_call:
+                tc_with_id = ChatCompletionMessageToolCall(
+                    id=f"call_{len(tool_calls) + 1}",
+                    type="function",
+                    function=Function(name=tool_call.function.name, arguments=tool_call.function.arguments),
+                )
+                tool_calls.append(tc_with_id)
+            remaining = remaining[:match.start()] + remaining[match.end():]
+
+        # Qwen XML pattern in <![CDATA[...]]> tags
+        cdata_pattern = re.compile(r'<!\[CDATA\[(<function=\S+?>.*?</function>)\]\]>', re.DOTALL)
+        for match in reversed(list(cdata_pattern.finditer(remaining))):
+            xml_content = match.group(1)
+            tool_call = OpenAIGPTConfig._parse_qwen_xml_to_tool_call(xml_content)
+            if tool_call:
+                tc_with_id = ChatCompletionMessageToolCall(
+                    id=f"call_{len(tool_calls) + 1}",
+                    type="function",
+                    function=Function(name=tool_call.function.name, arguments=tool_call.function.arguments),
+                )
+                tool_calls.append(tc_with_id)
+            remaining = remaining[:match.start()] + remaining[match.end():]
+
+        # JSON pattern in <tool_call> tags (opencode-style or OpenAI-style tool calls)
+        json_wrapper_pattern = re.compile(r'<tool_call[^>]*>\s*(\{.*?\})\s*</tool_call>', re.DOTALL)
+        for match in reversed(list(json_wrapper_pattern.finditer(remaining))):
+            json_content = match.group(1)
+            try:
+                parsed = json.loads(json_content)
+                tool_name = parsed.get("type") or parsed.get("name")
+                if tool_name:
+                    arguments = {
+                        k: v for k, v in parsed.items()
+                        if k not in ("type", "name")
+                    }
+                    tc_with_id = ChatCompletionMessageToolCall(
+                        id=f"call_{len(tool_calls) + 1}",
+                        type="function",
+                        function=Function(
+                            name=str(tool_name),
+                            arguments=json.dumps(arguments, separators=(",", ":")),
+                        ),
+                    )
+                    tool_calls.append(tc_with_id)
+            except (json.JSONDecodeError, TypeError):
+                pass
+            remaining = remaining[:match.start()] + remaining[match.end():]
+
+        return remaining, tool_calls

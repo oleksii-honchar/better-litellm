@@ -1,0 +1,41 @@
+# Local test — validates the better-litellm Docker image starts and routes work.
+# Usage: cd better-litellm && docker compose -f docker-compose.test.yaml up -d
+
+services:
+  test-db:
+    image: postgres:16-alpine
+    container_name: better-litellm-test-db
+    restart: "no"
+    environment:
+      POSTGRES_USER: litellm
+      POSTGRES_PASSWORD: litellm_db_password
+      POSTGRES_DB: litellm
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U litellm"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  test-litellm:
+    image: tuiteraz/better-litellm:main-v1.87.0-stable  # ← Built image
+    container_name: better-litellm-test
+    restart: "no"
+    ports:
+      - "4000:4000"
+    volumes:
+      - ./test-config.yaml:/app/config.yaml
+    command:
+      - "--config=/app/config.yaml"
+    environment:
+      - LITELLM_MASTER_KEY=test-key-for-local-testing
+    depends_on:
+      test-db:
+        condition: service_healthy
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - python3 -c "import urllib.request; urllib.request.urlopen('http://localhost:4000/health/liveliness', timeout=10)"
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 30s
