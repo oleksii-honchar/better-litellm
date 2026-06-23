@@ -393,7 +393,7 @@ print(m)
       export OTEL_METRICS_EXPORTER=none
       export STORE_MODEL_IN_DB=True
       export HEADROOM_OTEL_METRICS_ENABLED=true
-      export HEADROOM_OTEL_METRICS_ENDPOINT="${HEADROOM_OTEL_METRICS_ENDPOINT:-http://clickstack-otel-collector:4317}"
+      export HEADROOM_OTEL_METRICS_ENDPOINT="${HEADROOM_OTEL_METRICS_ENDPOINT:-http://clickstack-otel-collector:4318}"
       export HEADROOM_OTEL_METRICS_EXPORTER=otlp_http
       export HEADROOM_OTEL_SERVICE_NAME=headroom-proxy
 
