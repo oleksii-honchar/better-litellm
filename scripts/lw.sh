@@ -318,10 +318,14 @@ cmd_start_prod() {
     echo "  prisma:   ✗ no venv at $REPO_DIR/.venv — run '$0 setup' or '$0 rebuild' first"
     exit 1
   else
-    echo "  prisma:   module not found — installing into $REPO_DIR/.venv..."
-    "$REPO_DIR/.venv/bin/pip" install prisma 2>&1 | sed 's/^/           /'
+    echo "  prisma:   module not found — installing matching version..."
+    # Install the exact version from pyproject.toml lock (>=0.11.0,<1.0)
+    # Use venv pip so it goes into the right place
+    "$REPO_DIR/.venv/bin/pip" install "prisma>=0.11.0,<1.0" 2>&1 | sed 's/^/           /'
     echo "  prisma:   generating client..."
-    "$REPO_DIR/.venv/bin/prisma" generate --schema="$REPO_DIR/schema.prisma" 2>&1 | sed 's/^/           /'
+    # Add venv bin to PATH so prisma-client-py generator is found
+    PATH="$REPO_DIR/.venv/bin:$PATH" \
+      "$REPO_DIR/.venv/bin/prisma" generate --schema="$REPO_DIR/schema.prisma" 2>&1 | sed 's/^/           /'
     echo "  prisma:   ✓ ready"
   fi
 
