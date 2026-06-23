@@ -287,6 +287,20 @@ cmd_start_prod() {
     fi
   fi
 
+  # Prisma client generation — required for STORE_MODEL_IN_DB=True
+  echo "  prisma:   checking generated client..."
+  if python3 -c "import prisma" 2>/dev/null; then
+    echo "  prisma:   ✓ generated"
+  else
+    echo "  prisma:   not found — running prisma generate..."
+    if command -v prisma &> /dev/null; then
+      prisma generate --schema="$REPO_DIR/schema.prisma" 2>&1 | sed 's/^/           /'
+    else
+      echo "  prisma:   CLI not found — attempting via uv run..."
+      uv run --directory "$REPO_DIR" prisma generate --schema="$REPO_DIR/schema.prisma" 2>&1 | sed 's/^/           /'
+    fi
+  fi
+
   echo ""
   echo "Starting litellm proxy (prod mode) from source..."
   echo "  Mode:     infisical run --env=prod --path=/lite-llm"
