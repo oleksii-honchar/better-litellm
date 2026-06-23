@@ -129,6 +129,25 @@ def get_instance_fn(value: str, config_file_path: Optional[str] = None) -> Any:
         # Get the instance from the module
         instance = getattr(module, instance_name)
 
+        # Wrap HeadroomCallback — it inherits from object, not CustomLogger,
+        # so the proxy's _callback_capabilities() skips it entirely. Our
+        # adapter class inherits from CustomLogger and adapts the hook signatures.
+        if value == "headroom.integrations.litellm_callback.HeadroomCallback":
+            try:
+                from litellm.integrations.headroom_adapter import (  # noqa: PLC0415
+                    HeadroomCallbackAdapter,
+                )
+            except ImportError as e:
+                from litellm._logging import verbose_proxy_logger
+
+                verbose_proxy_logger.warning(
+                    "Failed to import HeadroomCallbackAdapter, falling back to raw "
+                    "HeadroomCallback (compression will not work): %s",
+                    e,
+                )
+            else:
+                return HeadroomCallbackAdapter
+
         # Ensure callback classes have LiteLLM's standard hooks as pass-throughs.
         # Installed packages (e.g. headroom-ai) may not inherit from CustomLogger,
         # but the proxy calls these methods on all non-guardrail callbacks.
