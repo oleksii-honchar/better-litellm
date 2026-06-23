@@ -9,7 +9,7 @@ resolution-markers = [
 ]
 
 [options]
-exclude-newer = "2026-06-19T18:42:28.924591Z"
+exclude-newer = "2026-06-20T09:41:38.113009Z"
 exclude-newer-span = "P3D"
 
 [manifest]
@@ -3534,7 +3534,7 @@ requires-dist = [
     { name = "grpcio", marker = "extra == 'grpc'", specifier = "==1.78.0" },
     { name = "grpcio", marker = "extra == 'proxy-runtime'", specifier = "==1.78.0" },
     { name = "gunicorn", marker = "extra == 'proxy'", specifier = ">=23.0.0,<24.0" },
-    { name = "headroom-ai", marker = "extra == 'proxy'", specifier = ">=0.1.0" },
+    { name = "headroom-ai", marker = "extra == 'proxy'", specifier = "==0.26.0" },
     { name = "httpx", specifier = ">=0.28.0,<1.0" },
     { name = "importlib-metadata", specifier = ">=8.0.0,<9.0" },
     { name = "jinja2", specifier = ">=3.1.6,<4.0" },
@@ -3583,7 +3583,7 @@ requires-dist = [
     { name = "uvloop", marker = "sys_platform != 'win32' and extra == 'proxy'", specifier = ">=0.21.0,<1.0" },
     { name = "websockets", marker = "extra == 'proxy'", specifier = ">=15.0.1,<16.0" },
 ]
-provides-extras = ["proxy", "extra-proxy", "utils", "caching", "semantic-router", "mlflow", "grpc", "stt-nvidia-riva", "google", "proxy-runtime"]
+provides-extras = ["caching", "extra-proxy", "google", "grpc", "mlflow", "proxy", "proxy-runtime", "semantic-router", "stt-nvidia-riva", "utils"]
 
 [package.metadata.requires-dev]
 ci = [
