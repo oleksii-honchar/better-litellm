@@ -39,6 +39,7 @@ except ImportError:
 #   EncodingException: 'NoneType' object has no attribute 'to_bytes'
 # Monkey-patch the _encode_data_point() to coerce None → time_unix_nano.
 try:
+    import opentelemetry.exporter.otlp.proto.common._internal.metrics_encoder as _otel_metrics_mod  # type: ignore
     from opentelemetry.exporter.otlp.proto.common._internal.metrics_encoder import (
         _encode_data_point as _orig_encode_data_point,
     )  # type: ignore
@@ -49,8 +50,8 @@ try:
                 dp.start_time_unix_nano = dp.time_unix_nano
         return _orig_encode_data_point(dp)  # type: ignore
 
-    _encode_data_point.__code__ = _patched_encode_data_point.__code__  # type: ignore[assignment]
-    _encode_data_point.__globals__["_encode_data_point"] = _patched_encode_data_point  # type: ignore[assignment]
+    # Replace in module namespace so callers see the patched version
+    _otel_metrics_mod._encode_data_point = _patched_encode_data_point  # type: ignore
 
 except (ImportError, AttributeError):
     # OTEL SDK not installed or incompatible version — no patch needed
