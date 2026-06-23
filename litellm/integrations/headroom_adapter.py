@@ -37,30 +37,54 @@ except ImportError:
 # headroom-ai creates Gauge metrics with start_time_unix_nano=None, but the OTEL
 # HTTP exporter's encode_metrics() calls .to_bytes() on it, crashing with:
 #   EncodingException: 'NoneType' object has no attribute 'to_bytes'
-# Patch OTLPMetricExporter.export to fix data points before encoding.
-# (Can't monkey-patch _encode_data_point because Python's "from X import Y" binds
-# Y as a local name at import time, so module-level replacement is too late.)
+# Patch OTLPMetricExporter.export to replace frozen data points before encoding.
+# NumberDataPoint is a frozen dataclass — can't mutate, must replace with replace().
 try:
+    from dataclasses import replace as _dc_replace  # type: ignore[attr-defined]
+
     from opentelemetry.exporter.otlp.proto.http.metric_exporter import (
         OTLPMetricExporter as _OTEL_HTTPExporter,
     )  # type: ignore
 
     _orig_otel_export = _OTEL_HTTPExporter.export  # type: ignore[attr-defined]
 
+    def _fix_dp(dp):
+        """Replace a frozen data point if start_time_unix_nano is None."""
+        if getattr(dp, "start_time_unix_nano", 0) is not None:
+            return dp
+        tn = getattr(dp, "time_unix_nano", None)
+        if tn is None:
+            return dp
+        return _dc_replace(dp, start_time_unix_nano=tn)  # type: ignore[arg-type]
+
     def _patched_otel_export(
         self, metrics_data, timeout_millis: int = 10_000  # type: ignore[assignment]
     ):
-        # Fix start_time_unix_nano=None on all data points before encoding
-        for rm in metrics_data.resource_metrics:
-            for sm in rm.scope_metrics:
-                for metric in sm.metrics:
+        fixed = metrics_data
+        for rm_idx, rm in enumerate(fixed.resource_metrics):
+            for sm_idx, sm in enumerate(rm.scope_metrics):
+                for m_idx, metric in enumerate(sm.metrics):
                     data = getattr(metric, "data", None)
-                    if data is not None:
-                        for dp in getattr(data, "data_points", []):
-                            if getattr(dp, "start_time_unix_nano", None) is None:
-                                if getattr(dp, "time_unix_nano", None) is not None:
-                                    dp.start_time_unix_nano = dp.time_unix_nano
-        return _orig_otel_export(self, metrics_data, timeout_millis=timeout_millis)  # type: ignore
+                    if data is None:
+                        continue
+                    dps = getattr(data, "data_points", [])
+                    if not dps:
+                        continue
+                    new_dps = [_fix_dp(dp) for dp in dps]
+                    if new_dps == list(dps):  # no change needed
+                        continue
+                    new_data = _dc_replace(data, data_points=new_dps)  # type: ignore[arg-type]
+                    new_metric = _dc_replace(metric, data=new_data)  # type: ignore[arg-type]
+                    new_metrics = [
+                        new_metric if i == m_idx else m for i, m in enumerate(sm.metrics)
+                    ]
+                    new_sm = _dc_replace(sm, metrics=new_metrics)  # type: ignore[arg-type]
+                    new_rms = [
+                        new_sm if i == sm_idx else s for i, s in enumerate(rm.scope_metrics)
+                    ]
+                    new_rm = _dc_replace(rm, scope_metrics=new_rms)  # type: ignore[arg-type]
+                    fixed = _dc_replace(fixed, resource_metrics=[new_rm])  # type: ignore[arg-type]
+        return _orig_otel_export(self, fixed, timeout_millis=timeout_millis)  # type: ignore
 
     _OTEL_HTTPExporter.export = _patched_otel_export  # type: ignore
 
