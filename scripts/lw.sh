@@ -294,20 +294,62 @@ cmd_start_prod() {
     exit 1
   fi
 
-  # Check if litellm-db (Postgres) is running — required for prod mode
-  if docker ps --format '{{.Names}}' 2>/dev/null | grep -q '^lite-llm-db$'; then
-    echo "  lite-llm-db: ✓ running"
-  else
-    echo "  lite-llm-db: ⚠ not running — attempting to start..."
+  # Check / start litellm-db (Postgres) — required for prod mode.
+  # When running from source (not Docker), we need:
+  #   (a) Container running
+  #   (b) Port 5432 exposed on host (config.yaml uses "litellm-db:5432" — Docker DNS)
+  #   (c) DATABASE_URL overridden to localhost
+  local db_port_exposed=false
+  if docker container inspect lite-llm-db &>/dev/null; then
+    # Container exists
+    if docker ps --format '{{.Names}}' | grep -q '^lite-llm-db$'; then
+      echo "  lite-llm-db: ✓ running"
+      docker port lite-llm-db 5432 &>/dev/null && db_port_exposed=true
+    else
+      echo "  lite-llm-db: container exists but stopped — starting..."
+      docker start lite-llm-db
+      echo "  Waiting for Postgres..."
+      sleep 3
+    fi
+  fi
+
+  if [[ "$db_port_exposed" != true ]]; then
+    if docker container inspect lite-llm-db &>/dev/null; then
+      echo "  lite-llm-db: port 5432 not exposed — recreating with host port..."
+      docker rm -f lite-llm-db
+    fi
     if [[ -f "$puma_lan_dir/lite-llm/docker-compose.yaml" ]]; then
-      echo "  Starting litellm-db from $puma_lan_dir/lite-llm/docker-compose.yaml"
-      docker compose -f "$puma_lan_dir/lite-llm/docker-compose.yaml" up -d litellm-db
+      echo "  lite-llm-db: starting from compose with port 5432 exposed..."
+      docker compose -f "$puma_lan_dir/lite-llm/docker-compose.yaml" \
+        run -d --publish 5432:5432 --name lite-llm-db litellm-db
       echo "  Waiting for Postgres health check..."
       sleep 5
     else
-      echo "WARNING: lite-llm-db not running and no compose file found at $puma_lan_dir/lite-llm/"
-      echo "  Postgres must be accessible at the host/port configured in config.yaml"
+      echo "  lite-llm-db: starting with default params..."
+      docker run -d --name lite-llm-db \
+        --network puma-net \
+        -p 5432:5432 \
+        -e POSTGRES_USER=litellm \
+        -e POSTGRES_PASSWORD=litellm_db_password \
+        -e POSTGRES_DB=litellm \
+        -v litellm-db-data:/var/lib/postgresql/data \
+        postgres:16-alpine
+      echo "  Waiting for Postgres..."
+      sleep 5
     fi
+    db_port_exposed=true
+  fi
+
+  # Verify DB is reachable via localhost
+  echo "  lite-llm-db: verifying host access..."
+  if python3 -c "
+import socket
+s = socket.create_connection(('localhost', 5432), timeout=5)
+s.close()
+" 2>/dev/null; then
+    echo "  lite-llm-db: ✓ accessible at localhost:5432"
+  else
+    echo "  lite-llm-db: ⚠ not reachable at localhost:5432 — check container logs"
   fi
 
   # Prisma client generation — required for STORE_MODEL_IN_DB=True
@@ -380,11 +422,21 @@ print(m)
       # OPENAI_API_KEY, MOONSHOT_API_KEY, MINIMAX_API_KEY, DEEPSEEK_API_KEY,
       # HYPERDX_API_KEY, ... — already in env at this point.
 
+      # === Overrides for source-code mode (host, not Docker) ===
+      # Postgres: config.yaml uses `litellm-db:5432` (Docker DNS).
+      # When running from source on the host, DB port is now published to localhost.
+      export DATABASE_URL="postgresql://litellm:litellm_db_password@localhost:5432/litellm"
+
+      # OTel: Docker DNS names (clickstack-otel-collector) wont resolve on host.
+      # Default to localhost — Override via OTEL_EXPORTER_OTLP_ENDPOINT env var
+      # if the collector port is on a different host.
+      export OTEL_EXPORTER_OTLP_ENDPOINT="${OTEL_EXPORTER_OTLP_ENDPOINT:-http://localhost:4317}"
+      export HEADROOM_OTEL_METRICS_ENDPOINT="${HEADROOM_OTEL_METRICS_ENDPOINT:-http://localhost:4318/v1/metrics}"
+
       # === Non-secret env vars (hardcoded in docker-compose.yaml) ===
       export TZ=Europe/Madrid
       export DOCS_URL="${DOCS_URL:-/docs}"
       export ROOT_REDIRECT_URL="${ROOT_REDIRECT_URL:-/ui}"
-      export OTEL_EXPORTER_OTLP_ENDPOINT="${OTEL_EXPORTER_OTLP_ENDPOINT:-http://clickstack-otel-collector:4317}"
       export OTEL_EXPORTER_OTLP_PROTOCOL=grpc
       # Composed from Infisical-provided HYPERDX_API_KEY (resolved inside this context)
       export OTEL_EXPORTER_OTLP_HEADERS="authorization=${HYPERDX_API_KEY}"
@@ -393,7 +445,6 @@ print(m)
       export OTEL_METRICS_EXPORTER=none
       export STORE_MODEL_IN_DB=True
       export HEADROOM_OTEL_METRICS_ENABLED=true
-      export HEADROOM_OTEL_METRICS_ENDPOINT="${HEADROOM_OTEL_METRICS_ENDPOINT:-http://clickstack-otel-collector:4318}"
       export HEADROOM_OTEL_METRICS_EXPORTER=otlp_http
       export HEADROOM_OTEL_SERVICE_NAME=headroom-proxy
 
