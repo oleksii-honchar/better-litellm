@@ -289,7 +289,7 @@ cmd_start_prod() {
 
   # Prisma client generation — required for STORE_MODEL_IN_DB=True
   echo "  prisma:   checking generated client..."
-  if python3 -c "import prisma" 2>/dev/null; then
+  if "$REPO_DIR/.venv/bin/python" -c "import prisma" 2>/dev/null; then
     echo "  prisma:   ✓ generated"
   elif [[ ! -f "$REPO_DIR/.venv/bin/python" ]]; then
     echo "  prisma:   ✗ no venv at $REPO_DIR/.venv — run '$0 setup' or '$0 rebuild' first"
