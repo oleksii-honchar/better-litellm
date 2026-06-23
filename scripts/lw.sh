@@ -83,7 +83,12 @@ assert_upstream() {
 
 assert_venv() {
   if [[ ! -d "$REPO_DIR/.venv" ]]; then
-    echo "No .venv found. Run '$0 setup' first."
+    echo "No .venv directory found. Run '$0 setup' or '$0 rebuild' first."
+    exit 1
+  fi
+  if [[ ! -f "$REPO_DIR/.venv/bin/activate" ]]; then
+    echo ".venv directory exists but activation script is missing — venv is corrupted."
+    echo "Run '$0 rebuild' to recreate it from scratch."
     exit 1
   fi
 }
@@ -113,9 +118,14 @@ cmd_setup() {
   echo "Setting up better-litellm venv..."
 
   if [[ -d "$REPO_DIR/.venv" ]]; then
-    echo "Venv already exists — running build instead. Use 'rebuild' to recreate."
-    cmd_build
-    return
+    if [[ -f "$REPO_DIR/.venv/bin/activate" ]]; then
+      echo "Venv already exists — running build instead. Use 'rebuild' to recreate."
+      cmd_build
+      return
+    else
+      echo "Existing .venv directory is corrupted (missing activate script). Recreating..."
+      rm -rf "$REPO_DIR/.venv"
+    fi
   fi
 
   python3 -m venv "$REPO_DIR/.venv"
