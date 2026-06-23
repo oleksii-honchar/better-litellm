@@ -1373,7 +1373,7 @@ class OpenTelemetry(OTELGenAISemconvMixin, CustomLogger):
                 duration_s, attributes=common_attrs
             )
             if (
-                response_obj
+                isinstance(response_obj, dict)
                 and (usage := response_obj.get("usage"))
                 and self._token_usage_histogram
             ):
@@ -1462,7 +1462,7 @@ class OpenTelemetry(OTELGenAISemconvMixin, CustomLogger):
 
         # Get completion tokens from response_obj
         completion_tokens = None
-        if response_obj and (usage := response_obj.get("usage")):
+        if isinstance(response_obj, dict) and (usage := response_obj.get("usage")):
             completion_tokens = usage.get("completion_tokens")
 
         if completion_tokens is None or completion_tokens <= 0:
@@ -1639,7 +1639,7 @@ class OpenTelemetry(OTELGenAISemconvMixin, CustomLogger):
             otel_logger.emit(log_record)
 
         # per-choice events
-        for idx, choice in enumerate(response_obj.get("choices", [])):
+        for idx, choice in enumerate(response_obj.get("choices", []) if isinstance(response_obj, dict) else []):
             attrs = {
                 "event_name": "gen_ai.content.completion",
                 "gen_ai.system": provider,
@@ -2231,7 +2231,7 @@ class OpenTelemetry(OTELGenAISemconvMixin, CustomLogger):
             # the litellm call ID so every call type can be correlated
             # across LiteLLM UI, Phoenix traces, and provider logs (Issue #8).
             response_id = (
-                response_obj.get("id") if response_obj else None
+                response_obj.get("id") if isinstance(response_obj, dict) else None
             ) or standard_logging_payload.get("id")
             if response_id:
                 self.safe_set_attribute(
@@ -2249,14 +2249,14 @@ class OpenTelemetry(OTELGenAISemconvMixin, CustomLogger):
                 )
 
             # The model used to generate the response.
-            if response_obj and response_obj.get("model"):
+            if isinstance(response_obj, dict) and response_obj.get("model"):
                 self.safe_set_attribute(
                     span=span,
                     key=SpanAttributes.LLM_RESPONSE_MODEL.value,
                     value=response_obj.get("model"),
                 )
 
-            usage = response_obj and response_obj.get("usage")
+            usage = response_obj and isinstance(response_obj, dict) and response_obj.get("usage")
             if usage:
                 self.safe_set_attribute(
                     span=span,
@@ -2360,7 +2360,7 @@ class OpenTelemetry(OTELGenAISemconvMixin, CustomLogger):
             #############################################
             ########## LLM Response Attributes ##########
             #############################################
-            if response_obj is not None:
+            if isinstance(response_obj, dict):
                 if response_obj.get("choices"):
                     transformed_choices = (
                         self._transform_choices_to_otel_semantic_conventions(
