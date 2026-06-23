@@ -53,6 +53,7 @@ Environment:
   LITELLM_PORT         Override proxy port (default: 4000)
   PUMA_LAN_DIR         Path to puma-lan repo (default: ~/puma-lan)
   CONFIG_FILE          Override config path (default: \$PUMA_LAN_DIR/lite-llm/config.yaml)
+  DATABASE_URL         Override DB URL (default: postgresql://litellm:***@localhost:5432/litellm)
 
 Examples:
   $0 setup                    # First time: create venv + install
@@ -294,53 +295,15 @@ cmd_start_prod() {
     exit 1
   fi
 
-  # Check / start litellm-db (Postgres) — required for prod mode.
-  # When running from source (not Docker), we need:
-  #   (a) Container running
-  #   (b) Port 5432 exposed on host (config.yaml uses "litellm-db:5432" — Docker DNS)
-  #   (c) DATABASE_URL overridden to localhost
-  local db_port_exposed=false
-  if docker container inspect lite-llm-db &>/dev/null; then
-    # Container exists
-    if docker ps --format '{{.Names}}' | grep -q '^lite-llm-db$'; then
-      echo "  lite-llm-db: ✓ running"
-      docker port lite-llm-db 5432 &>/dev/null && db_port_exposed=true
-    else
-      echo "  lite-llm-db: container exists but stopped — starting..."
-      docker start lite-llm-db
-      echo "  Waiting for Postgres..."
-      sleep 3
-    fi
-  fi
+  # DB container is managed from puma-lan/lite-llm (docker-compose.yaml).
+  # We only verify it's accessible at localhost:5432 — we don't start/stop it.
+  #
+  # Infisical provides DATABASE_URL with `litellm-db:5432` (Docker DNS).
+  # For source-code mode, we need localhost. We set it here BEFORE infisical run,
+  # and also inside the bash -c block (where Infisical secrets are available).
+  local db_url="${DATABASE_URL:-postgresql://litellm:litellm_db_password@localhost:5432/litellm}"
+  echo "  DATABASE_URL will be: $db_url"
 
-  if [[ "$db_port_exposed" != true ]]; then
-    if docker container inspect lite-llm-db &>/dev/null; then
-      echo "  lite-llm-db: port 5432 not exposed — recreating with host port..."
-      docker rm -f lite-llm-db
-    fi
-    if [[ -f "$puma_lan_dir/lite-llm/docker-compose.yaml" ]]; then
-      echo "  lite-llm-db: starting from compose with port 5432 exposed..."
-      docker compose -f "$puma_lan_dir/lite-llm/docker-compose.yaml" \
-        run -d --publish 5432:5432 --name lite-llm-db litellm-db
-      echo "  Waiting for Postgres health check..."
-      sleep 5
-    else
-      echo "  lite-llm-db: starting with default params..."
-      docker run -d --name lite-llm-db \
-        --network puma-net \
-        -p 5432:5432 \
-        -e POSTGRES_USER=litellm \
-        -e POSTGRES_PASSWORD=litellm_db_password \
-        -e POSTGRES_DB=litellm \
-        -v litellm-db-data:/var/lib/postgresql/data \
-        postgres:16-alpine
-      echo "  Waiting for Postgres..."
-      sleep 5
-    fi
-    db_port_exposed=true
-  fi
-
-  # Verify DB is reachable via localhost
   echo "  lite-llm-db: verifying host access..."
   if python3 -c "
 import socket
@@ -349,7 +312,10 @@ s.close()
 " 2>/dev/null; then
     echo "  lite-llm-db: ✓ accessible at localhost:5432"
   else
-    echo "  lite-llm-db: ⚠ not reachable at localhost:5432 — check container logs"
+    echo "  lite-llm-db: ⚠ not reachable at localhost:5432"
+    echo "    — make sure the DB container is started from puma-lan/lite-llm/"
+    echo "    — and port 5432 is published (check docker-compose.yaml)"
+    exit 1
   fi
 
   # Prisma client generation — required for STORE_MODEL_IN_DB=True
@@ -412,6 +378,7 @@ print(m)
   export REPO_DIR
   export port
   export config
+  export db_url
 
   infisical run --env=prod --path=/lite-llm -- \
     bash -c '
@@ -423,9 +390,12 @@ print(m)
       # HYPERDX_API_KEY, ... — already in env at this point.
 
       # === Overrides for source-code mode (host, not Docker) ===
-      # Postgres: config.yaml uses `litellm-db:5432` (Docker DNS).
-      # When running from source on the host, DB port is now published to localhost.
-      export DATABASE_URL="postgresql://litellm:litellm_db_password@localhost:5432/litellm"
+      # Postgres: Infisical provides DATABASE_URL with `litellm-db:5432` (Docker DNS).
+      # When running from source on the host, DB is accessed via localhost.
+      # This override MUST come after Infisical injects its secrets.
+      # The db_url variable is passed from the outer script (exported above).
+      export DATABASE_URL="$db_url"
+      echo "  [start-prod] DATABASE_URL => $DATABASE_URL" >&2
 
       # OTel: Docker DNS names (clickstack-otel-collector) wont resolve on host.
       # Default to localhost — Override via OTEL_EXPORTER_OTLP_ENDPOINT env var
