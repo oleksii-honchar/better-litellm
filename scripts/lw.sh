@@ -16,6 +16,7 @@
 #   ./scripts/lw.sh push              # Push patched/main to origin
 #   ./scripts/lw.sh sbr               # Full cycle: sync → build → start
 #   ./scripts/lw.sh docker-build      # Build Docker image (delegates to build-and-push.sh)
+#   ./scripts/lw.sh start-prod        # Start proxy with prod env (Infisical + puma-lan config)
 #
 # All commands auto-detect the repo root from this script's location.
 # Override with BETTER_LITELLM_DIR env var.
@@ -44,11 +45,14 @@ Commands:
   push              Push patched/main to origin (regular push, not force)
   sbr               Full cycle: sync → build → start
   docker-build      Build + push Docker image (delegates to build-and-push.sh)
+  start-prod        Start source-code proxy with prod config + Infisical secrets
   help              Show this help message
 
 Environment:
   BETTER_LITELLM_DIR   Override repo root (default: auto-detected)
   LITELLM_PORT         Override proxy port (default: 4000)
+  PUMA_LAN_DIR         Path to puma-lan repo (default: ~/puma-lan)
+  CONFIG_FILE          Override config path (default: \$PUMA_LAN_DIR/lite-llm/config.yaml)
 
 Examples:
   $0 setup                    # First time: create venv + install
@@ -56,6 +60,7 @@ Examples:
   $0 build                    # Reinstall after changes
   $0 sbr                      # Sync + build + start proxy
   $0 sync --theirs            # Force-upstream on conflicts
+  $0 start-prod               # Start proxy with prod Infisical secrets + config
 EOF
 }
 
@@ -224,6 +229,121 @@ cmd_startuv() {
   uv run --directory "$REPO_DIR" litellm --port "$port" --config "$config"
 }
 
+cmd_start_prod() {
+  assert_in_repo
+
+  # Check prerequisites
+  if ! command -v infisical &> /dev/null; then
+    echo "ERROR: infisical CLI not found — required for prod secrets."
+    echo "  Install: npm install -g @infisical/cli"
+    echo "  Login:   infisical login"
+    echo "  Docs:    https://infisical.com/docs/cli/install"
+    exit 1
+  fi
+
+  if ! command -v uv &> /dev/null; then
+    echo "ERROR: uv not found. Install: pip install uv"
+    exit 1
+  fi
+
+  local port="${LITELLM_PORT:-4000}"
+  local puma_lan_dir="${PUMA_LAN_DIR:-$HOME/puma-lan}"
+  local config="${CONFIG_FILE:-$puma_lan_dir/lite-llm/config.yaml}"
+
+  if [[ ! -f "$config" ]]; then
+    echo "ERROR: Prod config not found: $config"
+    echo ""
+    echo "  start-prod uses the puma-lan/lite-llm config.yaml (not the dev config)"
+    echo "  Set PUMA_LAN_DIR or CONFIG_FILE to point to your puma-lan checkout."
+    echo ""
+    echo "  Expected: \$PUMA_LAN_DIR/lite-llm/config.yaml"
+    echo "  Current:  PUMA_LAN_DIR=$puma_lan_dir"
+    exit 1
+  fi
+
+  # Check if litellm-db (Postgres) is running — required for prod mode
+  if docker ps --format '{{.Names}}' 2>/dev/null | grep -q '^lite-llm-db$'; then
+    echo "  lite-llm-db: ✓ running"
+  else
+    echo "  lite-llm-db: ⚠ not running — attempting to start..."
+    if [[ -f "$puma_lan_dir/lite-llm/docker-compose.yaml" ]]; then
+      echo "  Starting litellm-db from $puma_lan_dir/lite-llm/docker-compose.yaml"
+      docker compose -f "$puma_lan_dir/lite-llm/docker-compose.yaml" up -d litellm-db
+      echo "  Waiting for Postgres health check..."
+      sleep 5
+    else
+      echo "WARNING: lite-llm-db not running and no compose file found at $puma_lan_dir/lite-llm/"
+      echo "  Postgres must be accessible at the host/port configured in config.yaml"
+    fi
+  fi
+
+  echo ""
+  echo "Starting litellm proxy (prod mode) from source..."
+  echo "  Mode:     infisical run --env=prod --path=/lite-llm"
+  echo "  Config:   $config"
+  echo "  Port:     $port"
+  echo "  Source:   $REPO_DIR"
+  echo ""
+
+  # NOTE: Some docker-compose.yaml env vars reference Docker-internal DNS names
+  # (e.g. clickstack-otel-collector:4317) which won't resolve on the host.
+  # If the OTel collector port is not exposed to the host, override via:
+  #   OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4317 \
+  #   HEADROOM_OTEL_METRICS_ENDPOINT=http://localhost:4318 \
+  #   ./scripts/lw.sh start-prod
+  #
+  # How Infisical is used:
+  # 1. `infisical run --env=prod --path=/lite-llm` fetches ALL secrets from the
+  #    `/lite-llm` path in Infisical's `prod` environment (LITELLM_MASTER_KEY,
+  #    UI_USERNAME, UI_PASSWORD, ANTHROPIC_API_KEY, OPENAI_API_KEY,
+  #    MOONSHOT_API_KEY, MINIMAX_API_KEY, DEEPSEEK_API_KEY, HYPERDX_API_KEY, ...).
+  # 2. Those secrets become environment variables for the `bash -c '...'` child process.
+  # 3. Inside that child, we set the non-secret hardcoded env vars (TZ, OTEL endpoints,
+  #    Headroom config) and compose OTEL_EXPORTER_OTLP_HEADERS from HYPERDX_API_KEY.
+  # 4. All expansion happens AFTER Infisical injects its secrets, so HYPERDX_API_KEY
+  #    is available when constructing OTEL_EXPORTER_OTLP_HEADERS.
+  #
+  # Required setup on the remote host:
+  #   npm install -g @infisical/cli && infisical login
+
+  # Export these so they're available inside the `bash -c` subprocess
+  export REPO_DIR
+  export port
+  export config
+
+  infisical run --env=prod --path=/lite-llm -- \
+    bash -c '
+      set -euo pipefail
+
+      # === Secrets from Infisical (injected by `infisical run`) ===
+      # LITELLM_MASTER_KEY, UI_USERNAME, UI_PASSWORD, ANTHROPIC_API_KEY,
+      # OPENAI_API_KEY, MOONSHOT_API_KEY, MINIMAX_API_KEY, DEEPSEEK_API_KEY,
+      # HYPERDX_API_KEY, ... — already in env at this point.
+
+      # === Non-secret env vars (hardcoded in docker-compose.yaml) ===
+      export TZ=Europe/Madrid
+      export DOCS_URL="${DOCS_URL:-/docs}"
+      export ROOT_REDIRECT_URL="${ROOT_REDIRECT_URL:-/ui}"
+      export OTEL_EXPORTER_OTLP_ENDPOINT="${OTEL_EXPORTER_OTLP_ENDPOINT:-http://clickstack-otel-collector:4317}"
+      export OTEL_EXPORTER_OTLP_PROTOCOL=grpc
+      # Composed from Infisical-provided HYPERDX_API_KEY (resolved inside this context)
+      export OTEL_EXPORTER_OTLP_HEADERS="authorization=${HYPERDX_API_KEY}"
+      export OTEL_SERVICE_NAME=litellm
+      export OTEL_TRACES_EXPORTER=otlp
+      export OTEL_METRICS_EXPORTER=none
+      export STORE_MODEL_IN_DB=True
+      export HEADROOM_OTEL_METRICS_ENABLED=true
+      export HEADROOM_OTEL_METRICS_ENDPOINT="${HEADROOM_OTEL_METRICS_ENDPOINT:-http://clickstack-otel-collector:4317}"
+      export HEADROOM_OTEL_METRICS_EXPORTER=otlp_http
+      export HEADROOM_OTEL_SERVICE_NAME=headroom-proxy
+
+      # REPO_DIR, port, config are exported from the outer script — available as env vars
+      exec uv run --directory "$REPO_DIR" litellm \
+        --port "$port" \
+        --config "$config"
+    '
+}
+
 cmd_push() {
   assert_in_repo
   echo "Pushing patched/main to origin..."
@@ -260,6 +380,7 @@ case "${1:-help}" in
   startuv)    cmd_startuv ;;
   push)       cmd_push ;;
   sbr)        cmd_sbr ;;
+  start-prod) cmd_start_prod ;;
   docker-build) shift; cmd_docker_build "$@" ;;
   help|-h|--help)  usage ;;
   *)          echo "Unknown command: $1"; echo; usage; exit 1 ;;
