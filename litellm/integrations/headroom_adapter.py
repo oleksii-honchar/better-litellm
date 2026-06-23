@@ -33,6 +33,29 @@ except ImportError:
     configure_otel_metrics = None  # type: ignore[assignment,misc]
     OTelMetricsConfig = None  # type: ignore[assignment,misc]
 
+# ── OTEL SDK 1.28+ compatibility fix ──────────────────────────────────────────
+# headroom-ai creates Gauge metrics with start_time_unix_nano=None, but the OTEL
+# HTTP exporter's encode_metrics() calls .to_bytes() on it, crashing with:
+#   EncodingException: 'NoneType' object has no attribute 'to_bytes'
+# Monkey-patch the _encode_data_point() to coerce None → time_unix_nano.
+try:
+    from opentelemetry.exporter.otlp.proto.common._internal.metrics_encoder import (
+        _encode_data_point as _orig_encode_data_point,
+    )  # type: ignore
+
+    def _patched_encode_data_point(dp: Any) -> Any:
+        if getattr(dp, "start_time_unix_nano", None) is None:
+            if getattr(dp, "time_unix_nano", None) is not None:
+                dp.start_time_unix_nano = dp.time_unix_nano
+        return _orig_encode_data_point(dp)  # type: ignore
+
+    _encode_data_point.__code__ = _patched_encode_data_point.__code__  # type: ignore[assignment]
+    _encode_data_point.__globals__["_encode_data_point"] = _patched_encode_data_point  # type: ignore[assignment]
+
+except (ImportError, AttributeError):
+    # OTEL SDK not installed or incompatible version — no patch needed
+    pass  # noqa: PIE790
+
 
 class HeadroomCallbackAdapter(CustomLogger):
     """Wraps HeadroomCallback for LiteLLM proxy compatibility.
