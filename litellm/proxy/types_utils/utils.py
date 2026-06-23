@@ -30,14 +30,20 @@ def _get_pass_through_hook(hook_name: str) -> Callable[..., None]:
 
 
 async def _async_post_call_success_hook_pass_through(
-    self: Any, data: dict, user_api_key_dict: Any, response: Any
+    data: dict, user_api_key_dict: Any, response: Any,
 ) -> None:
-    """Pass-through for async_post_call_success_hook — returns None."""
+    """Pass-through for async_post_call_success_hook — returns None.
+
+    Note: no `self` param — LiteLLM calls these on the **class** (not an
+    instance) for callbacks that don't inherit from CustomLogger, so
+    Python doesn't auto-bind self. The proxy passes keyword-only args
+    matching LiteLLM's CustomLogger signature.
+    """
     pass
 
 
 async def _async_post_call_failure_hook_pass_through(
-    self: Any, request_data: dict, original_exception: Exception,
+    request_data: dict, original_exception: Exception,
     user_api_key_dict: Any, traceback_str: str = None,
 ) -> None:
     """Pass-through for async_post_call_failure_hook — returns None."""
@@ -45,7 +51,7 @@ async def _async_post_call_failure_hook_pass_through(
 
 
 async def _async_post_call_response_headers_hook_pass_through(
-    self: Any, data: dict, user_api_key_dict: Any, response: Any,
+    data: dict, user_api_key_dict: Any, response: Any,
     request_headers: dict[str, str] = None, litellm_call_info: dict[str, Any] = None,
 ) -> None:
     """Pass-through for async_post_call_response_headers_hook — returns None."""
