@@ -4,6 +4,37 @@ import importlib.util
 import os
 from typing import Any, Callable, Literal, Optional, get_type_hints
 
+# Signature of LiteLLM's standard callback hooks — used to create pass-through
+# methods for callback classes that don't inherit from CustomLogger.
+_CALLBACK_HOOK_SIGNATURES = {
+    "async_post_call_success_hook": "self, data, user_api_key_dict, response",
+    "async_post_call_failure_hook": "self, request_data, original_exception, user_api_key_dict, traceback_str=None",
+    "async_post_call_response_headers_hook": "self, data, user_api_key_dict, response, request_headers=None, litellm_call_info=None",
+}
+
+_CACHED_PASS_THROUGH_METHODS: dict[str, Callable[..., Any]] = {}
+
+
+def _add_pass_through_hook(cls: type, hook_name: str) -> None:
+    """Monkey-patch a pass-through async method onto a callback class.
+
+    Some third-party callback classes (e.g. HeadroomCallback from headroom-ai)
+    don't inherit from CustomLogger but LiteLLM's proxy still calls these hooks.
+    We add a no-op so the proxy pipeline doesn't crash with AttributeError.
+    """
+    if hook_name not in _CALLBACK_HOOK_SIGNATURES:
+        return
+
+    if hook_name not in _CACHED_PASS_THROUGH_METHODS:
+        sig = _CALLBACK_HOOK_SIGNATURES[hook_name]
+        # Build: async def hook_name(self, ...): return None
+        source = f"async def {hook_name}({sig}): return None"
+        namespace = {"hook_name": hook_name}
+        exec(compile(source, "<callback-patch>", "exec"), namespace)
+        _CACHED_PASS_THROUGH_METHODS[hook_name] = namespace[hook_name]
+
+    setattr(cls, hook_name, _CACHED_PASS_THROUGH_METHODS[hook_name])
+
 
 def get_instance_fn(value: str, config_file_path: Optional[str] = None) -> Any:
     module_name = value
@@ -63,6 +94,17 @@ def get_instance_fn(value: str, config_file_path: Optional[str] = None) -> Any:
 
         # Get the instance from the module
         instance = getattr(module, instance_name)
+
+        # Ensure callback classes have LiteLLM's standard hooks as pass-throughs.
+        # Installed packages (e.g. headroom-ai) may not inherit from CustomLogger,
+        # but the proxy calls these methods on all non-guardrail callbacks.
+        if isinstance(instance, type):
+            if not hasattr(instance, "async_post_call_success_hook"):
+                _add_pass_through_hook(instance, "async_post_call_success_hook")
+            if not hasattr(instance, "async_post_call_failure_hook"):
+                _add_pass_through_hook(instance, "async_post_call_failure_hook")
+            if not hasattr(instance, "async_post_call_response_headers_hook"):
+                _add_pass_through_hook(instance, "async_post_call_response_headers_hook")
 
         return instance
     except ImportError as e:
@@ -185,6 +227,16 @@ def _load_instance_from_remote_storage(
 
         # Get the instance
         instance = getattr(module, instance_name)
+
+        # Same hook-patching as in get_instance_fn — remote callbacks also
+        # need pass-through methods for LiteLLM proxy hooks.
+        if isinstance(instance, type):
+            if not hasattr(instance, "async_post_call_success_hook"):
+                _add_pass_through_hook(instance, "async_post_call_success_hook")
+            if not hasattr(instance, "async_post_call_failure_hook"):
+                _add_pass_through_hook(instance, "async_post_call_failure_hook")
+            if not hasattr(instance, "async_post_call_response_headers_hook"):
+                _add_pass_through_hook(instance, "async_post_call_response_headers_hook")
 
         # Clean up the temporary file
         try:
