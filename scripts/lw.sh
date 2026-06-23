@@ -311,19 +311,27 @@ cmd_start_prod() {
   fi
 
   # Prisma client generation — required for STORE_MODEL_IN_DB=True
+  # Note: `import prisma` succeeds even without generation (the package is installed).
+  # We must check for generated model files specifically.
   echo "  prisma:   checking generated client..."
-  if "$REPO_DIR/.venv/bin/python" -c "import prisma" 2>/dev/null; then
+  local prisma_models_marker
+  prisma_models_marker=$("$REPO_DIR/.venv/bin/python" -c "
+import prisma, os
+m = os.path.join(prisma.__path__[0], 'models.py')
+print(m)
+" 2>/dev/null)
+
+  if [[ -n "$prisma_models_marker" && -f "$prisma_models_marker" ]]; then
     echo "  prisma:   ✓ generated"
   elif [[ ! -f "$REPO_DIR/.venv/bin/python" ]]; then
     echo "  prisma:   ✗ no venv at $REPO_DIR/.venv — run '$0 setup' or '$0 rebuild' first"
     exit 1
   else
-    echo "  prisma:   module not found — installing matching version..."
-    # Install the exact version from pyproject.toml lock (>=0.11.0,<1.0)
-    # Use venv pip so it goes into the right place
+    echo "  prisma:   installing matching version..."
+    # Use the version range from pyproject.toml (>=0.11.0,<1.0)
     "$REPO_DIR/.venv/bin/pip" install "prisma>=0.11.0,<1.0" 2>&1 | sed 's/^/           /'
     echo "  prisma:   generating client..."
-    # Add venv bin to PATH so prisma-client-py generator is found
+    # Add venv bin to PATH so prisma-client-py generator is found by the prisma CLI
     PATH="$REPO_DIR/.venv/bin:$PATH" \
       "$REPO_DIR/.venv/bin/prisma" generate --schema="$REPO_DIR/schema.prisma" 2>&1 | sed 's/^/           /'
     echo "  prisma:   ✓ ready"
