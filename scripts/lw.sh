@@ -291,14 +291,15 @@ cmd_start_prod() {
   echo "  prisma:   checking generated client..."
   if python3 -c "import prisma" 2>/dev/null; then
     echo "  prisma:   ✓ generated"
+  elif [[ ! -f "$REPO_DIR/.venv/bin/python" ]]; then
+    echo "  prisma:   ✗ no venv at $REPO_DIR/.venv — run '$0 setup' or '$0 rebuild' first"
+    exit 1
   else
-    echo "  prisma:   not found — running prisma generate..."
-    if command -v prisma &> /dev/null; then
-      prisma generate --schema="$REPO_DIR/schema.prisma" 2>&1 | sed 's/^/           /'
-    else
-      echo "  prisma:   CLI not found — attempting via uv run..."
-      uv run --directory "$REPO_DIR" prisma generate --schema="$REPO_DIR/schema.prisma" 2>&1 | sed 's/^/           /'
-    fi
+    echo "  prisma:   module not found — installing into $REPO_DIR/.venv..."
+    "$REPO_DIR/.venv/bin/pip" install prisma 2>&1 | sed 's/^/           /'
+    echo "  prisma:   generating client..."
+    "$REPO_DIR/.venv/bin/prisma" generate --schema="$REPO_DIR/schema.prisma" 2>&1 | sed 's/^/           /'
+    echo "  prisma:   ✓ ready"
   fi
 
   echo ""
