@@ -146,7 +146,7 @@ def get_instance_fn(value: str, config_file_path: Optional[str] = None) -> Any:
                     e,
                 )
             else:
-                return HeadroomCallbackAdapter
+                return HeadroomCallbackAdapter()
 
         # Ensure callback classes have LiteLLM's standard hooks as pass-throughs.
         # Installed packages (e.g. headroom-ai) may not inherit from CustomLogger,
