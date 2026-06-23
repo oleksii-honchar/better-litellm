@@ -37,28 +37,46 @@ except ImportError:
 # headroom-ai creates Gauge metrics with start_time_unix_nano=None, but the OTEL
 # HTTP exporter's encode_metrics() calls .to_bytes() on it, crashing with:
 #   EncodingException: 'NoneType' object has no attribute 'to_bytes'
-# Patch _encode_data_point in the encoder module's __dict__. _encode_metric calls
-# _encode_data_point via LOAD_GLOBAL (runtime global lookup), so replacing it in
-# the module's __dict__ means all callers see the patched version. The patched
-# function creates a new data point with the correct start_time_unix_nano before
-# passing it to the original encoder.
+# Patch MeterProvider.create_gauge to wrap callbacks so they return data points
+# with start_time_unix_nano=time_unix_nano. This fixes the issue at the source
+# — before the encoder ever sees the bad data. (Can't patch _encode_data_point
+# in the encoder module because the calling code imports it via "from X import Y",
+# binding it at import time — our patch is too late.)
 try:
     from dataclasses import replace as _dc_replace  # type: ignore[attr-defined]
 
-    import opentelemetry.exporter.otlp.proto.common._internal.metrics_encoder as _otel_metrics_mod  # type: ignore
+    from opentelemetry.sdk.metrics import MeterProvider as _OTEL_MeterProvider  # type: ignore
 
-    _orig_encode_dp = getattr(_otel_metrics_mod, "_encode_data_point", None)
+    _orig_create_gauge = _OTEL_MeterProvider.create_gauge  # type: ignore[attr-defined]
 
-    if _orig_encode_dp is not None:
+    def _fix_gauge_callback(cb):
+        def _wrapped_cb(*args, **kwargs):
+            result = cb(*args, **kwargs)
+            if not result:
+                return result
+            fixed = []
+            for dp in result:
+                if getattr(dp, "start_time_unix_nano", None) is None:
+                    tn = getattr(dp, "time_unix_nano", None)
+                    if tn is not None:
+                        dp = _dc_replace(dp, start_time_unix_nano=tn)  # type: ignore[arg-type]
+                fixed.append(dp)
+            return fixed
+        return _wrapped_cb
 
-        def _patched_encode_dp(dp: Any):  # type: ignore[assignment]
-            if getattr(dp, "start_time_unix_nano", 0) is None:
-                tn = getattr(dp, "time_unix_nano", None)
-                if tn is not None:
-                    dp = _dc_replace(dp, start_time_unix_nano=tn)  # type: ignore[arg-type]
-            return _orig_encode_dp(dp)
+    def _patched_create_gauge(self, *args: Any, **kwargs: Any):  # type: ignore[assignment]
+        # callbacks is the 4th positional arg or a kwarg
+        if "callbacks" in kwargs and kwargs["callbacks"] is not None:
+            kwargs["callbacks"] = [
+                _fix_gauge_callback(cb) for cb in kwargs["callbacks"]
+            ]
+        elif len(args) >= 4 and args[3] is not None:
+            args_list = list(args)
+            args_list[3] = [_fix_gauge_callback(cb) for cb in args[3]]
+            args = tuple(args_list)
+        return _orig_create_gauge(self, *args, **kwargs)  # type: ignore
 
-        _otel_metrics_mod._encode_data_point = _patched_encode_dp
+    _OTEL_MeterProvider.create_gauge = _patched_create_gauge  # type: ignore
 
 except (ImportError, AttributeError):
     # OTEL SDK not installed or incompatible version — no patch needed
