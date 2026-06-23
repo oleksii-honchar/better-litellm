@@ -37,21 +37,32 @@ except ImportError:
 # headroom-ai creates Gauge metrics with start_time_unix_nano=None, but the OTEL
 # HTTP exporter's encode_metrics() calls .to_bytes() on it, crashing with:
 #   EncodingException: 'NoneType' object has no attribute 'to_bytes'
-# Monkey-patch the _encode_data_point() to coerce None → time_unix_nano.
+# Patch OTLPMetricExporter.export to fix data points before encoding.
+# (Can't monkey-patch _encode_data_point because Python's "from X import Y" binds
+# Y as a local name at import time, so module-level replacement is too late.)
 try:
-    import opentelemetry.exporter.otlp.proto.common._internal.metrics_encoder as _otel_metrics_mod  # type: ignore
-    from opentelemetry.exporter.otlp.proto.common._internal.metrics_encoder import (
-        _encode_data_point as _orig_encode_data_point,
+    from opentelemetry.exporter.otlp.proto.http.metric_exporter import (
+        OTLPMetricExporter as _OTEL_HTTPExporter,
     )  # type: ignore
 
-    def _patched_encode_data_point(dp: Any) -> Any:
-        if getattr(dp, "start_time_unix_nano", None) is None:
-            if getattr(dp, "time_unix_nano", None) is not None:
-                dp.start_time_unix_nano = dp.time_unix_nano
-        return _orig_encode_data_point(dp)  # type: ignore
+    _orig_otel_export = _OTEL_HTTPExporter.export  # type: ignore[attr-defined]
 
-    # Replace in module namespace so callers see the patched version
-    _otel_metrics_mod._encode_data_point = _patched_encode_data_point  # type: ignore
+    def _patched_otel_export(
+        self, metrics_data, timeout_millis: int = 10_000  # type: ignore[assignment]
+    ):
+        # Fix start_time_unix_nano=None on all data points before encoding
+        for rm in metrics_data.resource_metrics:
+            for sm in rm.scope_metrics:
+                for metric in sm.metrics:
+                    data = getattr(metric, "data", None)
+                    if data is not None:
+                        for dp in getattr(data, "data_points", []):
+                            if getattr(dp, "start_time_unix_nano", None) is None:
+                                if getattr(dp, "time_unix_nano", None) is not None:
+                                    dp.start_time_unix_nano = dp.time_unix_nano
+        return _orig_otel_export(self, metrics_data, timeout_millis=timeout_millis)  # type: ignore
+
+    _OTEL_HTTPExporter.export = _patched_otel_export  # type: ignore
 
 except (ImportError, AttributeError):
     # OTEL SDK not installed or incompatible version — no patch needed
