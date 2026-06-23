@@ -4,15 +4,52 @@ import importlib.util
 import os
 from typing import Any, Callable, Literal, Optional, get_type_hints
 
-# Signature of LiteLLM's standard callback hooks — used to create pass-through
-# methods for callback classes that don't inherit from CustomLogger.
-_CALLBACK_HOOK_SIGNATURES = {
-    "async_post_call_success_hook": "self, data, user_api_key_dict, response",
-    "async_post_call_failure_hook": "self, request_data, original_exception, user_api_key_dict, traceback_str=None",
-    "async_post_call_response_headers_hook": "self, data, user_api_key_dict, response, request_headers=None, litellm_call_info=None",
-}
+# Pass-through hook implementations for third-party callback classes that don't
+# inherit from CustomLogger. LiteLLM's proxy calls these on all non-guardrail
+# callbacks (see proxy/utils.py:2398), so they must exist and return None.
 
-_CACHED_PASS_THROUGH_METHODS: dict[str, Callable[..., Any]] = {}
+_CACHED_PASS_THROUGH_METHODS: dict[str, Callable[..., None]] = {}
+
+
+def _get_pass_through_hook(hook_name: str) -> Callable[..., None]:
+    """Return a cached pass-through async method for the given hook name."""
+    if hook_name in _CACHED_PASS_THROUGH_METHODS:
+        return _CACHED_PASS_THROUGH_METHODS[hook_name]
+
+    if hook_name == "async_post_call_success_hook":
+        fn = _async_post_call_success_hook_pass_through
+    elif hook_name == "async_post_call_failure_hook":
+        fn = _async_post_call_failure_hook_pass_through
+    elif hook_name == "async_post_call_response_headers_hook":
+        fn = _async_post_call_response_headers_hook_pass_through
+    else:
+        return None  # pragma: no cover
+
+    _CACHED_PASS_THROUGH_METHODS[hook_name] = fn
+    return fn
+
+
+async def _async_post_call_success_hook_pass_through(
+    self: Any, data: dict, user_api_key_dict: Any, response: Any
+) -> None:
+    """Pass-through for async_post_call_success_hook — returns None."""
+    pass
+
+
+async def _async_post_call_failure_hook_pass_through(
+    self: Any, request_data: dict, original_exception: Exception,
+    user_api_key_dict: Any, traceback_str: str = None,
+) -> None:
+    """Pass-through for async_post_call_failure_hook — returns None."""
+    pass
+
+
+async def _async_post_call_response_headers_hook_pass_through(
+    self: Any, data: dict, user_api_key_dict: Any, response: Any,
+    request_headers: dict[str, str] = None, litellm_call_info: dict[str, Any] = None,
+) -> None:
+    """Pass-through for async_post_call_response_headers_hook — returns None."""
+    pass
 
 
 def _add_pass_through_hook(cls: type, hook_name: str) -> None:
@@ -22,18 +59,9 @@ def _add_pass_through_hook(cls: type, hook_name: str) -> None:
     don't inherit from CustomLogger but LiteLLM's proxy still calls these hooks.
     We add a no-op so the proxy pipeline doesn't crash with AttributeError.
     """
-    if hook_name not in _CALLBACK_HOOK_SIGNATURES:
-        return
-
-    if hook_name not in _CACHED_PASS_THROUGH_METHODS:
-        sig = _CALLBACK_HOOK_SIGNATURES[hook_name]
-        # Build: async def hook_name(self, ...): return None
-        source = f"async def {hook_name}({sig}): return None"
-        namespace = {"hook_name": hook_name}
-        exec(compile(source, "<callback-patch>", "exec"), namespace)
-        _CACHED_PASS_THROUGH_METHODS[hook_name] = namespace[hook_name]
-
-    setattr(cls, hook_name, _CACHED_PASS_THROUGH_METHODS[hook_name])
+    fn = _get_pass_through_hook(hook_name)
+    if fn is not None:
+        setattr(cls, hook_name, fn)
 
 
 def get_instance_fn(value: str, config_file_path: Optional[str] = None) -> Any:
