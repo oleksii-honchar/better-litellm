@@ -111,11 +111,32 @@ choose_installer() {
   fi
 }
 
+choose_python() {
+  # litellm[proxy] requires Python >=3.10, <3.14
+  # Try known good versions in order of preference
+  for py in python3.12 python3.11 python3.10 python3; do
+    if command -v "$py" &> /dev/null; then
+      local ver
+      ver=$("$py" -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")')
+      if [[ "$ver" =~ ^3\.(1[0-3])(\.[0-9]+)?$ ]]; then
+        echo "$py"
+        return
+      fi
+    fi
+  done
+  echo ""
+  echo "ERROR: No suitable Python found. litellm[proxy] requires Python >=3.10, <3.14." >&2
+  echo "  Install one of: python3.10, python3.11, python3.12" >&2
+  return 1
+}
+
 # --- Commands ---
 
 cmd_setup() {
   assert_in_repo
-  echo "Setting up better-litellm venv..."
+  local python_bin
+  python_bin=$(choose_python) || exit 1
+  echo "Setting up better-litellm venv (using $python_bin)..."
 
   if [[ -d "$REPO_DIR/.venv" ]]; then
     if [[ -f "$REPO_DIR/.venv/bin/activate" ]]; then
@@ -128,7 +149,7 @@ cmd_setup() {
     fi
   fi
 
-  python3 -m venv "$REPO_DIR/.venv"
+  "$python_bin" -m venv "$REPO_DIR/.venv"
   source "$REPO_DIR/.venv/bin/activate"
 
   local installer
@@ -150,9 +171,11 @@ cmd_setup() {
 
 cmd_rebuild() {
   assert_in_repo
-  echo "Recreating venv from scratch..."
+  local python_bin
+  python_bin=$(choose_python) || exit 1
+  echo "Recreating venv from scratch (using $python_bin)..."
   rm -rf "$REPO_DIR/.venv"
-  python3 -m venv "$REPO_DIR/.venv"
+  "$python_bin" -m venv "$REPO_DIR/.venv"
   source "$REPO_DIR/.venv/bin/activate"
 
   local installer
