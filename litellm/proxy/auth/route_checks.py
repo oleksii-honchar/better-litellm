@@ -260,13 +260,27 @@ class RouteChecks:
             route=route,
         )
 
-        if RouteChecks.is_auth_enforced_pass_through_route(
+        # Check ALL registered pass-through routes — allows both auth: true
+        # (auth-enforced) and auth: false (pass-through) routes.
+        # Without this guard, auth: false routes fall through to the
+        # "admin only" exception because is_auth_enforced_pass_through_route
+        # returns False for them. (Bug 3 / ADR-003)
+        from litellm.proxy.pass_through_endpoints.pass_through_endpoints import (
+            InitPassThroughEndpointHelpers,
+        )
+
+        if InitPassThroughEndpointHelpers.is_registered_pass_through_route(
             route=route,
-            method=RouteChecks._get_request_method(request=request),
         ):
-            RouteChecks._require_auth_pass_through_access(
-                route=route, valid_token=valid_token
-            )
+            if RouteChecks.is_auth_enforced_pass_through_route(
+                route=route,
+                method=RouteChecks._get_request_method(request=request),
+            ):
+                # Auth-enforced routes (auth: true) — require access check
+                RouteChecks._require_auth_pass_through_access(
+                    route=route, valid_token=valid_token
+                )
+            # Auth-bypass routes (auth: false) — allowed (no blocking)
         elif RouteChecks.is_llm_api_route(route=route):
             pass
         elif RouteChecks.is_info_route(route=route):

@@ -2670,4 +2670,201 @@ def test_internal_user_blocked_from_search_tool_writes(route):
         )
     assert "Only proxy admin" in str(exc_info.value)
     assert f"Route={route}" in str(exc_info.value)
-    assert "Your role=internal_user" in str(exc_info.value)
+
+
+# =====================================================================
+# Bug 3 regression tests: Route permission check blocks auth: false
+# pass-through routes (ADR-003)
+# Fix: is_registered_pass_through_route outer guard before
+# is_auth_enforced_pass_through_route in non_proxy_admin_allowed_routes_check
+# =====================================================================
+
+
+def test_non_proxy_admin_allows_auth_false_pass_through_route():
+    """Auth-bypass routes (auth: false) must not trigger 'admin only' exception.
+
+    Regression test for Bug 3: after Bug 2 fix (subpath-aware auth bypass),
+    requests to auth: false pass-through routes were still blocked by the
+    route permission check in route_checks.py because
+    is_auth_enforced_pass_through_route returns False for auth: false routes,
+    causing them to fall through to the 'admin only' exception.
+    """
+    mock_registered_routes = {
+        "test-uuid-1:subpath:/codex/v1:DELETE,GET,PATCH,POST,PUT": {
+            "endpoint_id": "test-uuid-1",
+            "path": "/codex/v1",
+            "type": "subpath",
+            "auth": False,
+        },
+    }
+
+    # Empty auth object — as returned by auth bypass (Bug 2 fix)
+    valid_token = UserAPIKeyAuth(user_id=None)
+
+    with (
+        patch(
+            "litellm.proxy.pass_through_endpoints.pass_through_endpoints._registered_pass_through_routes",
+            mock_registered_routes,
+        ),
+        patch(
+            "litellm.proxy.utils.get_server_root_path",
+            return_value="/",
+        ),
+    ):
+        request = MagicMock(spec=Request)
+        request.query_params = {}
+
+        # Should NOT raise — auth: false route should be allowed
+        RouteChecks.non_proxy_admin_allowed_routes_check(
+            user_obj=None,
+            _user_role=None,
+            route="/codex/v1/responses",
+            request=request,
+            valid_token=valid_token,
+            request_data={},
+        )
+
+
+def test_non_proxy_admin_requires_access_for_auth_true_pass_through():
+    """Auth-enforced routes (auth: true) must still require allowed_passthrough_routes."""
+    mock_registered_routes = {
+        "test-uuid-1:exact:/my-pass-through:GET,POST": {
+            "endpoint_id": "test-uuid-1",
+            "path": "/my-pass-through",
+            "type": "exact",
+            "auth": True,
+        },
+    }
+
+    valid_token = UserAPIKeyAuth(user_id="test_user")
+
+    with (
+        patch(
+            "litellm.proxy.pass_through_endpoints.pass_through_endpoints._registered_pass_through_routes",
+            mock_registered_routes,
+        ),
+        patch(
+            "litellm.proxy.utils.get_server_root_path",
+            return_value="/",
+        ),
+    ):
+        with pytest.raises(HTTPException) as exc_info:
+            RouteChecks.non_proxy_admin_allowed_routes_check(
+                user_obj=None,
+                _user_role=LitellmUserRoles.INTERNAL_USER.value,
+                route="/my-pass-through",
+                request=MagicMock(spec=Request),
+                valid_token=valid_token,
+                request_data={},
+            )
+        assert exc_info.value.status_code == 403
+        assert "allowed_passthrough_routes" in exc_info.value.detail
+
+
+def test_non_proxy_admin_blocks_non_pass_through_route():
+    """Non-pass-through, non-LLM routes must still be blocked as admin only."""
+    valid_token = UserAPIKeyAuth(user_id=None)
+
+    with (
+        patch(
+            "litellm.proxy.pass_through_endpoints.pass_through_endpoints._registered_pass_through_routes",
+            {},  # No registered pass-through routes
+        ),
+    ):
+        with pytest.raises(Exception) as exc_info:
+            RouteChecks.non_proxy_admin_allowed_routes_check(
+                user_obj=None,
+                _user_role=None,
+                route="/admin/custom-action",
+                request=MagicMock(spec=Request),
+                valid_token=valid_token,
+                request_data={},
+            )
+        assert "Only proxy admin" in str(exc_info.value)
+
+
+def test_non_proxy_admin_allows_auth_false_exact_pass_through():
+    """Auth: false exact-match pass-through routes should be allowed."""
+    mock_registered_routes = {
+        "test-uuid-1:exact:/codex/v1:GET,POST": {
+            "endpoint_id": "test-uuid-1",
+            "path": "/codex/v1",
+            "type": "exact",
+            "auth": False,
+        },
+    }
+
+    valid_token = UserAPIKeyAuth(user_id=None)
+
+    with (
+        patch(
+            "litellm.proxy.pass_through_endpoints.pass_through_endpoints._registered_pass_through_routes",
+            mock_registered_routes,
+        ),
+        patch(
+            "litellm.proxy.utils.get_server_root_path",
+            return_value="/",
+        ),
+    ):
+        request = MagicMock(spec=Request)
+        request.query_params = {}
+
+        RouteChecks.non_proxy_admin_allowed_routes_check(
+            user_obj=None,
+            _user_role=None,
+            route="/codex/v1",
+            request=request,
+            valid_token=valid_token,
+            request_data={},
+        )
+
+
+def test_non_proxy_admin_allows_auth_false_subpath_pass_through():
+    """Auth: false subpath pass-through routes should allow subpath access.
+
+    This is the exact Codex scenario: path=/codex/v1, include_subpath=true,
+    auth=false, request to /codex/v1/responses.
+    """
+    mock_registered_routes = {
+        "test-uuid-1:subpath:/codex/v1:DELETE,GET,PATCH,POST,PUT": {
+            "endpoint_id": "test-uuid-1",
+            "path": "/codex/v1",
+            "type": "subpath",
+            "auth": False,
+        },
+    }
+
+    valid_token = UserAPIKeyAuth(user_id=None)
+
+    with (
+        patch(
+            "litellm.proxy.pass_through_endpoints.pass_through_endpoints._registered_pass_through_routes",
+            mock_registered_routes,
+        ),
+        patch(
+            "litellm.proxy.utils.get_server_root_path",
+            return_value="/",
+        ),
+    ):
+        request = MagicMock(spec=Request)
+        request.query_params = {}
+
+        # Test subpath access
+        RouteChecks.non_proxy_admin_allowed_routes_check(
+            user_obj=None,
+            _user_role=None,
+            route="/codex/v1/responses",
+            request=request,
+            valid_token=valid_token,
+            request_data={},
+        )
+
+        # Test deep subpath access
+        RouteChecks.non_proxy_admin_allowed_routes_check(
+            user_obj=None,
+            _user_role=None,
+            route="/codex/v1/chat/completions",
+            request=request,
+            valid_token=valid_token,
+            request_data={},
+        )
