@@ -17,6 +17,7 @@
 #   ./scripts/lw.sh sbr               # Full cycle: sync → build → start
 #   ./scripts/lw.sh docker-build      # Build Docker image (delegates to build-and-push.sh)
 #   ./scripts/lw.sh start-prod        # Start proxy with prod env (Infisical + puma-lan config)
+#   ./scripts/lw.sh check-integrations  Verify integration with external packages (headroom)
 #
 # All commands auto-detect the repo root from this script's location.
 # Override with BETTER_LITELLM_DIR env var.
@@ -45,8 +46,9 @@ Commands:
   push              Push patched/main to origin (regular push, not force)
   sbr               Full cycle: sync → build → start
   docker-build      Build + push Docker image (delegates to build-and-push.sh)
-  start-prod        Start source-code proxy with prod config + Infisical secrets
-  help              Show this help message
+   start-prod        Start source-code proxy with prod config + Infisical secrets
+   check-integrations Verify integration with external packages (headroom)
+   help              Show this help message
 
 Environment:
   BETTER_LITELLM_DIR   Override repo root (default: auto-detected)
@@ -449,6 +451,78 @@ cmd_docker_build() {
   exec "$SCRIPT_DIR/build-and-push.sh" "$@"
 }
 
+cmd_check_integrations() {
+  assert_in_repo
+  echo "🔍 Checking integrations..."
+  echo ""
+
+  local errors=0
+
+  # --- Headroom integration ---
+  echo "── Headroom ──"
+
+  # Check headroom import
+  if "$REPO_DIR/.venv/bin/python" -c "import headroom" 2>/dev/null; then
+    echo "  ✓ headroom importable"
+  else
+    echo "  ✗ headroom NOT importable"
+    errors=$((errors + 1))
+  fi
+
+  # Check headroom version
+  local headroom_version
+  headroom_version=$("$REPO_DIR/.venv/bin/python" -c "import headroom; print(headroom.__version__)" 2>/dev/null || echo "unknown")
+  echo "  version: $headroom_version"
+
+  # Check provider default (the fix we made)
+  local provider_default
+  provider_default=$("$REPO_DIR/.venv/bin/python" -c "
+import inspect
+from headroom.observability import metrics
+sig = inspect.signature(metrics.HeadroomOtelMetrics.record_pipeline_run)
+params = sig.parameters
+provider_param = params.get('provider', None)
+if provider_param and provider_param.default == 'local':
+    print('local (✓)')
+elif provider_param:
+    print(f'default={provider_param.default}')
+else:
+    print('unknown')
+" 2>/dev/null || echo "failed to check")
+  if [[ "$provider_default" == *"local"* ]]; then
+    echo "  ✓ Provider default: $provider_default"
+  else
+    echo "  ✗ Provider default: $provider_default (expected 'local')"
+    errors=$((errors + 1))
+  fi
+
+  # Check HeadroomCallback import
+  if "$REPO_DIR/.venv/bin/python" -c "from headroom.integrations.litellm_callback import HeadroomCallback" 2>/dev/null; then
+    echo "  ✓ HeadroomCallback importable"
+  else
+    echo "  ✗ HeadroomCallback NOT importable"
+    errors=$((errors + 1))
+  fi
+
+  # Check adapter import
+  if "$REPO_DIR/.venv/bin/python" -c "from litellm.integrations.headroom_adapter import HeadroomCallbackAdapter" 2>/dev/null; then
+    echo "  ✓ HeadroomCallbackAdapter importable"
+  else
+    echo "  ✗ HeadroomCallbackAdapter NOT importable"
+    errors=$((errors + 1))
+  fi
+
+  echo ""
+
+  # Summary
+  if [[ "$errors" -gt 0 ]]; then
+    echo "❌ $errors integration check(s) failed"
+    exit 1
+  else
+    echo "✅ All integration checks passed"
+  fi
+}
+
 # --- Main dispatch ---
 
 case "${1:-help}" in
@@ -462,7 +536,8 @@ case "${1:-help}" in
   push)       cmd_push ;;
   sbr)        cmd_sbr ;;
   start-prod) cmd_start_prod ;;
-  docker-build) shift; cmd_docker_build "$@" ;;
-  help|-h|--help)  usage ;;
+ docker-build) shift; cmd_docker_build "$@" ;;
+   check-integrations) cmd_check_integrations ;;
+   help|-h|--help)  usage ;;
   *)          echo "Unknown command: $1"; echo; usage; exit 1 ;;
 esac
