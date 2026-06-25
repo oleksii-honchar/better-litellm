@@ -134,3 +134,186 @@ async def test_runtime_check_explicit_auth_false_still_skips_validation():
     )
 
     assert isinstance(result, UserAPIKeyAuth)
+
+
+# ---------------------------------------------------------------------------
+# Subpath-aware auth bypass regression tests
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_subpath_route_triggers_auth_bypass_when_include_subpath_true():
+    """Subpath match with include_subpath=True should bypass auth.
+
+    Configured path="/codex/v1", include_subpath=True, auth=False.
+    Route "/codex/v1/responses" is a subpath → should return UserAPIKeyAuth().
+
+    This test FAILS against current code (exact match only).
+    """
+    from litellm.proxy._types import UserAPIKeyAuth
+
+    request = MagicMock()
+    request.headers = {}
+    raw_endpoint = {
+        "path": "/codex/v1",
+        "target": "https://example.com",
+        "auth": False,
+        "include_subpath": True,
+    }
+
+    result = await check_api_key_for_custom_headers_or_pass_through_endpoints(
+        request=request,
+        route="/codex/v1/responses",
+        pass_through_endpoints=[raw_endpoint],
+        api_key="",
+    )
+
+    assert isinstance(result, UserAPIKeyAuth)
+
+
+@pytest.mark.asyncio
+async def test_deep_subpath_route_triggers_auth_bypass():
+    """Deep subpath match with include_subpath=True should bypass auth.
+
+    Configured path="/codex/v1", include_subpath=True, auth=False.
+    Route "/codex/v1/chat/completions" is a deep subpath → should return UserAPIKeyAuth().
+
+    This test FAILS against current code (exact match only).
+    """
+    from litellm.proxy._types import UserAPIKeyAuth
+
+    request = MagicMock()
+    request.headers = {}
+    raw_endpoint = {
+        "path": "/codex/v1",
+        "target": "https://example.com",
+        "auth": False,
+        "include_subpath": True,
+    }
+
+    result = await check_api_key_for_custom_headers_or_pass_through_endpoints(
+        request=request,
+        route="/codex/v1/chat/completions",
+        pass_through_endpoints=[raw_endpoint],
+        api_key="",
+    )
+
+    assert isinstance(result, UserAPIKeyAuth)
+
+
+@pytest.mark.asyncio
+async def test_exact_match_still_triggers_auth_bypass():
+    """Exact match with auth=False should bypass auth (backward compat).
+
+    Configured path="/codex/v1", auth=False.
+    Route "/codex/v1" is an exact match → should return UserAPIKeyAuth().
+
+    This test should PASS against current code (exact match already works).
+    """
+    from litellm.proxy._types import UserAPIKeyAuth
+
+    request = MagicMock()
+    request.headers = {}
+    raw_endpoint = {
+        "path": "/codex/v1",
+        "target": "https://example.com",
+        "auth": False,
+    }
+
+    result = await check_api_key_for_custom_headers_or_pass_through_endpoints(
+        request=request,
+        route="/codex/v1",
+        pass_through_endpoints=[raw_endpoint],
+        api_key="",
+    )
+
+    assert isinstance(result, UserAPIKeyAuth)
+
+
+@pytest.mark.asyncio
+async def test_non_matching_route_does_not_bypass():
+    """Non-matching route should NOT bypass auth.
+
+    Configured path="/codex/v1", auth=False.
+    Route "/v1/responses" does not match → should return api_key string.
+
+    This test should PASS against current code (non-matching already fails).
+    """
+    request = MagicMock()
+    request.headers = {}
+    raw_endpoint = {
+        "path": "/codex/v1",
+        "target": "https://example.com",
+        "auth": False,
+    }
+
+    result = await check_api_key_for_custom_headers_or_pass_through_endpoints(
+        request=request,
+        route="/v1/responses",
+        pass_through_endpoints=[raw_endpoint],
+        api_key="sk-1234",
+    )
+
+    assert result == "sk-1234"
+
+
+@pytest.mark.asyncio
+async def test_without_include_subpath_subpath_does_not_bypass():
+    """Subpath without include_subpath should NOT bypass auth (exact match only).
+
+    Configured path="/codex/v1", auth=False, NO include_subpath key.
+    Route "/codex/v1/responses" is a subpath but include_subpath defaults to False
+    → should return api_key string (exact match only).
+
+    This test FAILS against current code because /codex/v1 != /codex/v1/responses,
+    so it actually returns the api_key — but the test documents the expected
+    behavior: subpaths should NOT bypass unless include_subpath=True.
+    """
+    request = MagicMock()
+    request.headers = {}
+    raw_endpoint = {
+        "path": "/codex/v1",
+        "target": "https://example.com",
+        "auth": False,
+        # include_subpath deliberately omitted — defaults to False
+    }
+
+    result = await check_api_key_for_custom_headers_or_pass_through_endpoints(
+        request=request,
+        route="/codex/v1/responses",
+        pass_through_endpoints=[raw_endpoint],
+        api_key="sk-1234",
+    )
+
+    assert result == "sk-1234"
+
+
+@pytest.mark.asyncio
+async def test_prefix_collision_does_not_bypass():
+    """Prefix collision should NOT bypass auth (trailing / boundary required).
+
+    Configured path="/codex", include_subpath=True, auth=False.
+    Route "/codexy/v1/responses" starts with "/codex" but NOT with
+    "/codex/" — the trailing slash boundary prevents the collision.
+    Should return api_key string.
+
+    This test verifies the boundary condition: without the trailing "/"
+    in startswith, a naive "startswith('/codex')" would match
+    "/codexy/v1/responses" — a false positive prefix collision.
+    """
+    request = MagicMock()
+    request.headers = {}
+    raw_endpoint = {
+        "path": "/codex",
+        "target": "https://example.com",
+        "auth": False,
+        "include_subpath": True,
+    }
+
+    result = await check_api_key_for_custom_headers_or_pass_through_endpoints(
+        request=request,
+        route="/codexy/v1/responses",
+        pass_through_endpoints=[raw_endpoint],
+        api_key="sk-1234",
+    )
+
+    assert result == "sk-1234"

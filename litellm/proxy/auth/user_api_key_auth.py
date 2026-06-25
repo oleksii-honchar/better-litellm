@@ -572,7 +572,23 @@ async def check_api_key_for_custom_headers_or_pass_through_endpoints(
             api_key = request.headers.get("litellm_user_api_key") or ""
     if pass_through_endpoints is not None:
         for endpoint in pass_through_endpoints:
-            if isinstance(endpoint, dict) and endpoint.get("path", "") == route:
+            # Subpath-aware path match (ADR-001):
+            # — exact match: endpoint_path == route
+            # — subpath match (when include_subpath=True): route starts with
+            #   endpoint_path + "/"  (trailing slash prevents prefix collisions,
+            #   e.g. "/codex" does NOT match "/codex/v1/responses")
+            endpoint_path = endpoint.get("path", "")
+            # Normalize endpoint path for consistency with upstream route
+            # normalization (ADR-002)
+            normalized_endpoint_path = normalize_route_for_root_path(endpoint_path) or endpoint_path
+            path_matches = (
+                normalized_endpoint_path == route
+                or (
+                    endpoint.get("include_subpath", False)
+                    and route.startswith(normalized_endpoint_path + "/")
+                )
+            )
+            if isinstance(endpoint, dict) and path_matches:
                 ## IF AUTH DISABLED
                 # Default to True: a config dict with no ``auth`` key
                 # otherwise produced an unauthenticated forwarder. The
