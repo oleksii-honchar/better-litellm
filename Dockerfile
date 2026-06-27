@@ -25,7 +25,8 @@ RUN apk add --no-cache \
     openssl-dev \
     nodejs \
     npm \
-    libsndfile
+    libsndfile \
+    coreutils
 
 ENV UV_PROJECT_ENVIRONMENT=/app/.venv \
     UV_LINK_MODE=copy \

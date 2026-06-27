@@ -1699,6 +1699,17 @@ class Usage(SafeAttributeModel, CompletionUsage):
         ):
             self._cache_read_input_tokens = params["prompt_cache_hit_tokens"]
 
+        ## OPENAI MAPPING — Map cached_tokens from prompt_tokens_details to PrivateAttr for OTel telemetry (ADR-004)
+        if _prompt_tokens_details is not None:
+            if hasattr(_prompt_tokens_details, "cached_tokens"):
+                cached = getattr(_prompt_tokens_details, "cached_tokens", None)
+                if cached is not None and cached > 0:
+                    self._cache_read_input_tokens = cached
+            if hasattr(_prompt_tokens_details, "cache_creation_tokens"):
+                creation = getattr(_prompt_tokens_details, "cache_creation_tokens", None)
+                if creation is not None and creation > 0:
+                    self._cache_creation_input_tokens = creation
+
         for k, v in params.items():
             setattr(self, k, v)
 

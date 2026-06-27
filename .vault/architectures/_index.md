@@ -2,7 +2,7 @@
 type: index
 title: "Architecture Maps (C4)"
 createdAt: "2026-06-23T22:30:00Z"
-updatedAt: "2026-06-23T22:30:00Z"
+updatedAt: "2026-06-27T20:30:00Z"
 tags: []
 ---
 
@@ -12,4 +12,4 @@ C4 layered architecture maps for the BetterLiteLLM project — system context �
 
 ## Nodes
 
-_No architecture maps yet._
+- [[0001-cache-token-telemetry-flow.component]] — Cache Token Telemetry Data Flow (C4 Component — litellm-telemetry)

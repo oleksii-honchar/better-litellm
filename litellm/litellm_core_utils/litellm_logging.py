@@ -5064,26 +5064,56 @@ class StandardLoggingPayloadSetup:
         """
         _empty: dict = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
         if combined_usage_object is not None:
-            return combined_usage_object.model_dump()
+            result = combined_usage_object.model_dump()
+            result["cache_read_input_tokens"] = getattr(
+                combined_usage_object, "_cache_read_input_tokens", 0
+            )
+            result["cache_creation_input_tokens"] = getattr(
+                combined_usage_object, "_cache_creation_input_tokens", 0
+            )
+            return result
         if not response_obj:
             return _empty
         _raw = response_obj.get("usage", None)
         if _raw is None:
             return _empty
         if isinstance(_raw, ResponseAPIUsage):
-            return ResponseAPILoggingUtils._transform_response_api_usage_to_chat_usage(
+            _usage = ResponseAPILoggingUtils._transform_response_api_usage_to_chat_usage(
                 _raw
-            ).model_dump()
+            )
+            result = _usage.model_dump()
+            result["cache_read_input_tokens"] = getattr(
+                _usage, "_cache_read_input_tokens", 0
+            )
+            result["cache_creation_input_tokens"] = getattr(
+                _usage, "_cache_creation_input_tokens", 0
+            )
+            return result
         if isinstance(_raw, dict):
             if ResponseAPILoggingUtils._is_response_api_usage(_raw):
-                return (
+                _usage = (
                     ResponseAPILoggingUtils._transform_response_api_usage_to_chat_usage(
                         _raw
-                    ).model_dump()
+                    )
                 )
+                result = _usage.model_dump()
+                result["cache_read_input_tokens"] = getattr(
+                    _usage, "_cache_read_input_tokens", 0
+                )
+                result["cache_creation_input_tokens"] = getattr(
+                    _usage, "_cache_creation_input_tokens", 0
+                )
+                return result
             return _raw
         if isinstance(_raw, Usage):
-            return _raw.model_dump()
+            result = _raw.model_dump()
+            result["cache_read_input_tokens"] = getattr(
+                _raw, "_cache_read_input_tokens", 0
+            )
+            result["cache_creation_input_tokens"] = getattr(
+                _raw, "_cache_creation_input_tokens", 0
+            )
+            return result
         return _empty
 
     @staticmethod
