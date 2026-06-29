@@ -15756,8 +15756,170 @@ if _HEADROOM_AVAILABLE and os.environ.get("HEADROOM_MIDDLEWARE_ENABLED", "").low
     verbose_proxy_logger.warning("Headroom compression middleware enabled")
 
     # Initialize headroom OTEL metrics export to ClickHouse (reads HEADROOM_OTEL_METRICS_* env vars)
+    # Monkey-patch HeadroomOtelMetrics to skip subscription gauges that crash OTLP HTTP encoding
+    # (start_time_unix_nano=None → 'NoneType' object has no attribute 'to_bytes')
     try:
         from headroom.observability import OTelMetricsConfig, configure_otel_metrics
+        from headroom.observability.metrics import HeadroomOtelMetrics
+
+        _orig_init = HeadroomOtelMetrics.__init__
+
+        def _patched_init(self, meter_provider=None):
+            # Run original init but skip subscription gauges (they crash OTLP HTTP encoding)
+            from opentelemetry import metrics
+            from opentelemetry.metrics import CallbackOptions, Observation
+            from importlib.metadata import version as pkg_version
+            from importlib.metadata import PackageNotFoundError
+
+            def _hr_version():
+                try:
+                    return pkg_version("headroom-ai")
+                except PackageNotFoundError:
+                    return "unknown"
+
+            meter = (
+                meter_provider.get_meter("headroom", _hr_version())
+                if meter_provider is not None
+                else metrics.get_meter("headroom", _hr_version())
+            )
+
+            # All counters (same as original)
+            self._proxy_requests = meter.create_counter(
+                "headroom.proxy.requests",
+                description="Proxy requests handled by Headroom.",
+                unit="1",
+            )
+            self._proxy_cached_requests = meter.create_counter(
+                "headroom.proxy.requests.cached",
+                description="Proxy requests served with provider cache participation.",
+                unit="1",
+            )
+            self._proxy_failed_requests = meter.create_counter(
+                "headroom.proxy.requests.failed",
+                description="Proxy requests that failed.",
+                unit="1",
+            )
+            self._proxy_rate_limited_requests = meter.create_counter(
+                "headroom.proxy.requests.rate_limited",
+                description="Proxy requests rejected by rate limiting.",
+                unit="1",
+            )
+            self._proxy_input_tokens = meter.create_counter(
+                "headroom.proxy.tokens.input",
+                description="Input tokens received by the proxy.",
+                unit="1",
+            )
+            self._proxy_output_tokens = meter.create_counter(
+                "headroom.proxy.tokens.output",
+                description="Output tokens returned by upstream providers.",
+                unit="1",
+            )
+            self._proxy_saved_tokens = meter.create_counter(
+                "headroom.proxy.tokens.saved",
+                description="Input tokens saved by Headroom compression.",
+                unit="1",
+            )
+            self._proxy_cache_read_tokens = meter.create_counter(
+                "headroom.proxy.cache.read_tokens",
+                description="Provider cache read tokens observed by the proxy.",
+                unit="1",
+            )
+            self._proxy_cache_write_tokens = meter.create_counter(
+                "headroom.proxy.cache.write_tokens",
+                description="Provider cache write tokens observed by the proxy.",
+                unit="1",
+            )
+            self._proxy_cache_write_ttl_tokens = meter.create_counter(
+                "headroom.proxy.cache.write_ttl_tokens",
+                description="Provider cache write tokens by observed TTL bucket.",
+                unit="1",
+            )
+            self._proxy_uncached_input_tokens = meter.create_counter(
+                "headroom.proxy.cache.uncached_input_tokens",
+                description="Proxy input tokens not served from provider cache.",
+                unit="1",
+            )
+            self._proxy_cache_busts = meter.create_counter(
+                "headroom.proxy.cache.busts",
+                description="Requests that lost provider cache efficiency.",
+                unit="1",
+            )
+            self._proxy_cache_bust_tokens_lost = meter.create_counter(
+                "headroom.proxy.cache.bust_tokens_lost",
+                description="Tokens that lost provider cache discount because of compression.",
+                unit="1",
+            )
+            # Histograms
+            self._proxy_latency = meter.create_histogram(
+                "headroom.proxy.request.duration",
+                description="End-to-end proxy request duration.",
+                unit="s",
+            )
+            self._proxy_overhead = meter.create_histogram(
+                "headroom.proxy.overhead.duration",
+                description="Time spent inside Headroom optimization logic.",
+                unit="s",
+            )
+            self._proxy_ttfb = meter.create_histogram(
+                "headroom.proxy.ttfb.duration",
+                description="Upstream time to first byte observed by Headroom.",
+                unit="s",
+            )
+            # Compression counters (the ones we actually need for the dashboard)
+            self._compression_runs = meter.create_counter(
+                "headroom.compression.runs",
+                description="Compression pipeline runs executed by Headroom.",
+                unit="1",
+            )
+            self._compression_failures = meter.create_counter(
+                "headroom.compression.failures",
+                description="Compression operations that failed before producing a result.",
+                unit="1",
+            )
+            self._compression_input_tokens = meter.create_counter(
+                "headroom.compression.tokens.input",
+                description="Input tokens analyzed by Headroom compression.",
+                unit="1",
+            )
+            self._compression_output_tokens = meter.create_counter(
+                "headroom.compression.tokens.output",
+                description="Output tokens produced by Headroom compression.",
+                unit="1",
+            )
+            self._compression_saved_tokens = meter.create_counter(
+                "headroom.compression.tokens.saved",
+                description="Tokens removed by Headroom compression.",
+                unit="1",
+            )
+            self._compression_duration = meter.create_histogram(
+                "headroom.compression.pipeline.duration",
+                description="Compression pipeline execution duration.",
+                unit="s",
+            )
+            self._compression_stage_duration = meter.create_histogram(
+                "headroom.compression.stage.duration",
+                description="Per-stage compression timing emitted by the pipeline.",
+                unit="s",
+            )
+            self._compression_transforms = meter.create_counter(
+                "headroom.compression.transforms",
+                description="Transforms applied during compression.",
+                unit="1",
+            )
+            self._waste_signal_tokens = meter.create_counter(
+                "headroom.compression.waste.tokens",
+                description="Waste tokens detected in compressed inputs.",
+                unit="1",
+            )
+            # Skip subscription gauges entirely — they crash OTLP HTTP encoding
+            # (start_time_unix_nano=None → 'NoneType' object has no attribute 'to_bytes')
+            self._sub_5h_util_val = 0.0
+            self._sub_7d_util_val = 0.0
+            self._sub_5h_reset_val = 0.0
+            self._sub_7d_reset_val = 0.0
+            self._sub_overage_val = 0.0
+
+        HeadroomOtelMetrics.__init__ = _patched_init
 
         configure_otel_metrics(
             OTelMetricsConfig.from_env(default_service_name="headroom-proxy")
