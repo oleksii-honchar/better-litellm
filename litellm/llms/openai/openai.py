@@ -730,7 +730,9 @@ class OpenAIChatCompletion(BaseLLM, BaseOpenAILLM):
             stream_options: Optional[dict] = inference_params.pop(
                 "stream_options", None
             )
-            stream: Optional[bool] = inference_params.pop("stream", False)
+            stream: Optional[bool] = inference_params.pop(
+                "stream", litellm_params.get("stream", False)
+            )
             provider_config: Optional[BaseConfig] = None
 
             if custom_llm_provider is not None and model is not None:

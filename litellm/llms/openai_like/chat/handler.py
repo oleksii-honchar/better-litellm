@@ -253,7 +253,7 @@ class OpenAILikeChatHandler(OpenAILikeBase):
             headers=headers,
         )
 
-        stream: bool = optional_params.pop("stream", None) or False
+        stream: bool = optional_params.pop("stream", None) or litellm_params.get("stream", False)
         extra_body = optional_params.pop("extra_body", {})
         json_mode = optional_params.pop("json_mode", None)
         optional_params.pop("max_retries", None)
