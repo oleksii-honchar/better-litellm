@@ -417,6 +417,15 @@ from litellm.proxy.middleware.prometheus_auth_middleware import PrometheusAuthMi
 from litellm.proxy.middleware.request_size_limit_middleware import (
     RequestSizeLimitMiddleware,
 )
+
+# Headroom compression middleware — optional, disabled by default
+try:
+    from headroom.integrations.asgi import CompressionMiddleware
+
+    _HEADROOM_AVAILABLE = True
+except ImportError:
+    _HEADROOM_AVAILABLE = False
+
 from litellm.proxy.shutdown.graceful_shutdown_manager import GracefulShutdownManager
 from litellm.proxy.ocr_endpoints.endpoints import router as ocr_router
 from litellm.proxy.openai_files_endpoints.files_endpoints import (
@@ -15735,6 +15744,28 @@ app.include_router(ui_discovery_endpoints_router)
 app.include_router(google_router)
 
 attach_lazy_features(app)
+
+# Headroom compression middleware — optional, disabled by default
+# Must be before RequestSizeLimitMiddleware to reduce request payload
+if _HEADROOM_AVAILABLE and os.environ.get("HEADROOM_MIDDLEWARE_ENABLED", "").lower() not in (
+    "0",
+    "false",
+    "no",
+    "",
+):
+    verbose_proxy_logger.warning("Headroom compression middleware enabled")
+
+    api_key = os.environ.get("HEADROOM_API_KEY")
+    min_tokens = int(os.environ.get("HEADROOM_MIN_TOKENS", "500"))
+    model_limit = int(os.environ.get("HEADROOM_MODEL_LIMIT", "200000"))
+
+    app.add_middleware(
+        CompressionMiddleware,
+        min_tokens=min_tokens,
+        model_limit=model_limit,
+        api_key=api_key,
+    )
+
 app.add_middleware(
     RequestSizeLimitMiddleware,
     get_max_request_size_mb=lambda: general_settings.get("max_request_size_mb"),
