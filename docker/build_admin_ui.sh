@@ -52,6 +52,11 @@ elif command -v shasum &>/dev/null; then
 else
   echo "No sha256 tool found; cannot verify nvm checksum"; exit 1
 fi || { echo "nvm checksum verification failed"; exit 1; }
+
+# Ensure ~/.bashrc exists — nvm install script requires a profile file
+# to append nvm initialization lines. wolfi-base image has none by default.
+[ -f ~/.bashrc ] || touch ~/.bashrc
+
 bash "$NVM_SCRIPT"
 source ~/.nvm/nvm.sh
 nvm install v18.17.0
