@@ -2286,8 +2286,11 @@ class BaseLLMHTTPHandler:
         if extra_headers:
             headers.update(extra_headers)
 
-        # Check if streaming is requested
-        stream = response_api_optional_request_params.get("stream", False)
+        # Check if streaming is requested - use litellm_params.stream as fallback
+        # Fixes Issue #28044: catch-all routes ignore stream: true in litellm_params
+        stream = response_api_optional_request_params.get(
+            "stream", litellm_params.get("stream", False)
+        )
 
         api_base = responses_api_provider_config.get_complete_url(
             api_base=litellm_params.api_base,
@@ -2432,8 +2435,11 @@ class BaseLLMHTTPHandler:
         if extra_headers:
             headers.update(extra_headers)
 
-        # Check if streaming is requested
-        stream = response_api_optional_request_params.get("stream", False)
+        # Check if streaming is requested - use litellm_params.stream as fallback
+        # Fixes Issue #28044: catch-all routes ignore stream: true in litellm_params
+        stream = response_api_optional_request_params.get(
+            "stream", litellm_params.get("stream", False)
+        )
 
         api_base = responses_api_provider_config.get_complete_url(
             api_base=litellm_params.api_base,
