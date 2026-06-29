@@ -15755,6 +15755,19 @@ if _HEADROOM_AVAILABLE and os.environ.get("HEADROOM_MIDDLEWARE_ENABLED", "").low
 ):
     verbose_proxy_logger.warning("Headroom compression middleware enabled")
 
+    # Initialize headroom OTEL metrics export to ClickHouse (reads HEADROOM_OTEL_METRICS_* env vars)
+    try:
+        from headroom.observability import OTelMetricsConfig, configure_otel_metrics
+
+        configure_otel_metrics(
+            OTelMetricsConfig.from_env(default_service_name="headroom-proxy")
+        )
+        verbose_proxy_logger.info("Headroom OTEL metrics export configured")
+    except Exception as e:
+        verbose_proxy_logger.warning(
+            "Failed to configure headroom OTEL metrics export: %s", e
+        )
+
     api_key = os.environ.get("HEADROOM_API_KEY")
     min_tokens = int(os.environ.get("HEADROOM_MIN_TOKENS", "500"))
     model_limit = int(os.environ.get("HEADROOM_MODEL_LIMIT", "200000"))
