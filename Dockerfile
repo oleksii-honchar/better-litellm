@@ -1,7 +1,9 @@
 # ── Global build args (must be before first FROM) ──────────────────────────────
-ARG LITELLM_BUILD_IMAGE=cgr.dev/chainguard/wolfi-base@sha256:31da6565f35af6401031c1d7aa91dc84ac76c5c48edd17fb90f0ed9e3173c7a9
-ARG LITELLM_RUNTIME_IMAGE=cgr.dev/chainguard/wolfi-base@sha256:31da6565f35af6401031c1d7aa91dc84ac76c5c48edd17fb90f0ed9e3173c7a9
-ARG UV_IMAGE=ghcr.io/astral-sh/uv:0.11.7@sha256:240fb85ab0f263ef12f492d8476aa3a2e4e1e333f7d67fbdd923d00a506a516a
+# Pin images by tag (not digest) so Docker resolves the correct architecture
+# for multi-arch builds (amd64 + arm64).
+ARG LITELLM_BUILD_IMAGE=cgr.dev/chainguard/wolfi-base:latest
+ARG LITELLM_RUNTIME_IMAGE=cgr.dev/chainguard/wolfi-base:latest
+ARG UV_IMAGE=ghcr.io/astral-sh/uv:0.11.7
 
 # ── Build stage 0: headroom-ai wheel (native Linux build) ────────────────────
 # Compiled natively so the Rust .so inside the wheel matches the Docker target.
