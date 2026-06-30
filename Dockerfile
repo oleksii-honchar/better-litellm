@@ -36,9 +36,14 @@ ENV UV_PROJECT_ENVIRONMENT=/app/.venv \
 COPY pyproject.toml uv.lock ./
 COPY enterprise/pyproject.toml enterprise/
 COPY litellm-proxy-extras/pyproject.toml litellm-proxy-extras/
+# Copy headroom source for local resolution
+# pyproject.toml references "../better-headroom" — rewrite to "./better-headroom"
+# so it resolves correctly inside Docker (where headroom lives at /app/better-headroom/)
+COPY better-headroom ./better-headroom/
+RUN sed -i 's|path = "\.\./better-headroom"|path = "./better-headroom"|' pyproject.toml
 
-# Install third-party dependencies (cached unless pyproject.toml/uv.lock change)
-RUN uv sync --frozen --no-install-project --no-install-workspace --no-default-groups --no-editable \
+# Install third-party dependencies (re-resolve to use local headroom source)
+RUN uv sync --no-install-project --no-install-workspace --no-default-groups --no-editable \
     --extra proxy \
     --extra proxy-runtime \
     --extra extra_proxy \
@@ -48,11 +53,14 @@ RUN uv sync --frozen --no-install-project --no-install-workspace --no-default-gr
 # Copy full source tree
 COPY . .
 
+# Re-apply headroom path fix (COPY . . overwrote pyproject.toml with original)
+RUN sed -i 's|path = "\.\./better-headroom"|path = "./better-headroom"|' pyproject.toml
+
 # Build Admin UI before final sync
 RUN sed -i 's/\r$//' docker/build_admin_ui.sh && chmod +x docker/build_admin_ui.sh && ./docker/build_admin_ui.sh
 
-# Install project and workspace packages (fast - deps already cached)
-RUN uv sync --frozen --no-default-groups --no-editable \
+# Install project and workspace packages (re-resolve to use local headroom source)
+RUN uv sync --no-default-groups --no-editable \
     --extra proxy \
     --extra proxy-runtime \
     --extra extra_proxy \

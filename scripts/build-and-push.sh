@@ -30,6 +30,13 @@ REPO="better-litellm"
 IMAGE_BASE="${REGISTRY}/${NAMESPACE}/${REPO}"
 FORK_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 
+# ── Compound build: better-headroom source ─────────────────────────────────────
+# better-litellm depends on local better-headroom (path dependency).
+# Docker can't resolve ../better-headroom — it's outside build context.
+# Copy headroom source into the build context so Docker can include it.
+HEADROOM_DIR="${BETTER_HEADROOM_DIR:-$(cd "$(dirname "$0")/../.." && pwd)/better-headroom}"
+HEADROOM_IN_CONTEXT="${FORK_DIR}/better-headroom"
+
 # ── Defaults ───────────────────────────────────────────────────────────────────
 BUILD_ONLY=false
 DRY_RUN=false
@@ -109,6 +116,42 @@ echo "Image base:      ${IMAGE_BASE}"
 echo "Tag:             ${TAG}"
 echo "Platform:        ${PLATFORM}"
 echo ""
+
+# ── Copy headroom source into build context ────────────────────────────────────
+if [[ -d "$HEADROOM_DIR" ]]; then
+  echo "=== Copying better-headroom into build context ==="
+  echo "  Source:      $HEADROOM_DIR"
+  echo "  Destination: $HEADROOM_IN_CONTEXT"
+  echo ""
+
+  if command -v rsync &> /dev/null; then
+    rsync -a --exclude='target' --exclude='.venv' --exclude='__pycache__' \
+      --exclude='*.pyc' --exclude='dist' --exclude='agent-evals' \
+      --exclude='tests' --exclude='e2e' --exclude='docker' --exclude='.git' \
+      "$HEADROOM_DIR/" "$HEADROOM_IN_CONTEXT/"
+  else
+    # Fallback: cp -r (slower, no exclusion support)
+    rm -rf "$HEADROOM_IN_CONTEXT"
+    cp -r "$HEADROOM_DIR" "$HEADROOM_IN_CONTEXT"
+  fi
+
+  # Verify crates/ present (needed for Rust/pyo3 wheel build)
+  if [[ ! -d "${HEADROOM_IN_CONTEXT}/crates" ]]; then
+    echo "ERROR: better-headroom/crates/ not found — Rust/pyo3 wheel build will fail!"
+    echo "  Source:      $HEADROOM_DIR"
+    echo "  Destination: $HEADROOM_IN_CONTEXT"
+    exit 1
+  fi
+
+  local_headroom_version="$(grep '^version' "${HEADROOM_IN_CONTEXT}/pyproject.toml" 2>/dev/null | head -1 | cut -d'"' -f2 || echo 'unknown')"
+  echo "  Headroom ver:  $local_headroom_version"
+  echo ""
+else
+  echo "WARNING: better-headroom not found at $HEADROOM_DIR"
+  echo "  Docker build will use PyPI version of headroom-ai (not local)"
+  echo "  Set BETTER_HEADROOM_DIR to override path"
+  echo ""
+fi
 
 # ── Helper ─────────────────────────────────────────────────────────────────────
 run_cmd() {
