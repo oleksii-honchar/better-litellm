@@ -36,13 +36,19 @@ ENV UV_PROJECT_ENVIRONMENT=/app/.venv \
 COPY pyproject.toml uv.lock ./
 COPY enterprise/pyproject.toml enterprise/
 COPY litellm-proxy-extras/pyproject.toml litellm-proxy-extras/
-# Copy headroom source for local resolution
-# pyproject.toml references "../better-headroom" — rewrite to "./better-headroom"
-# so it resolves correctly inside Docker (where headroom lives at /app/better-headroom/)
-COPY better-headroom ./better-headroom/
-RUN sed -i 's|path = "\.\./better-headroom"|path = "./better-headroom"|' pyproject.toml
 
-# Install third-party dependencies (re-resolve to use local headroom source)
+# Pre-install headroom from pre-built wheel (compact artifact ~20 MB) so uv
+# never tries to resolve the local path dependency from pyproject.toml.
+# Build the wheel first with: make headroom-wheel  (or: cd ../better-headroom && maturin build --release --out ../better-litellm/.wheels/)
+COPY .wheels/ /tmp/headroom-wheels/
+RUN uv pip install /tmp/headroom-wheels/*.whl && rm -rf /tmp/headroom-wheels
+
+# Remove the local path dependency so uv resolves from the pre-installed wheel.
+# (The path dep stays in pyproject.toml for local dev — only removed inside Docker.)
+RUN sed -i '/headroom-ai = { path = "\.\.\/better-headroom" }/d' pyproject.toml \
+    && sed -i '/\.\.\/better-headroom/d' pyproject.toml
+
+# Install third-party dependencies (headroom-ai is already installed, uv skips it)
 RUN uv sync --no-install-project --no-install-workspace --no-default-groups --no-editable \
     --extra proxy \
     --extra proxy-runtime \
@@ -53,13 +59,10 @@ RUN uv sync --no-install-project --no-install-workspace --no-default-groups --no
 # Copy full source tree
 COPY . .
 
-# Re-apply headroom path fix (COPY . . overwrote pyproject.toml with original)
-RUN sed -i 's|path = "\.\./better-headroom"|path = "./better-headroom"|' pyproject.toml
-
 # Build Admin UI before final sync
 RUN sed -i 's/\r$//' docker/build_admin_ui.sh && chmod +x docker/build_admin_ui.sh && ./docker/build_admin_ui.sh
 
-# Install project and workspace packages (re-resolve to use local headroom source)
+# Install project and workspace packages (headroom-ai already installed, uv skips it)
 RUN uv sync --no-default-groups --no-editable \
     --extra proxy \
     --extra proxy-runtime \

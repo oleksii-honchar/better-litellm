@@ -35,6 +35,30 @@ __pycache__/
 .ruff_cache/
 **/pyvenv.cfg
 
+# Pre-built headroom wheel artifacts (see Makefile headroom-wheel target)
+.wheels/
+
+# better-headroom source tree — NOT copied into Docker anymore.
+# A pre-built wheel from .wheels/ is used instead.
+# These exclude patterns prevent accidental source pulls:
+better-headroom/target/
+better-headroom/.git/
+better-headroom/.github/
+better-headroom/examples/
+better-headroom/tests/
+better-headroom/docs/
+better-headroom/wiki/
+better-headroom/benchmarks/
+better-headroom/sdk/
+better-headroom/plugins/
+better-headroom/scripts/
+better-headroom/e2e/
+better-headroom/agent-evals/
+better-headroom/.devcontainer/
+better-headroom/node_modules/
+better-headroom/dist/
+better-headroom/build/
+
 # Common project exclusions
 .vscode
 *.pyo

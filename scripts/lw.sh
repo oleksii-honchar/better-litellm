@@ -15,7 +15,8 @@
 #   ./scripts/lw.sh startuv           # Start via uv (no venv activation needed)
 #   ./scripts/lw.sh push              # Push patched/main to origin
 #   ./scripts/lw.sh sbr               # Full cycle: sync → build → start
-#   ./scripts/lw.sh docker-build      # Build Docker image (delegates to build-and-push.sh)
+#   ./scripts/lw.sh docker-build      # Build Docker image (builds headroom wheel first, then delegates to build-and-push.sh)
+#   ./scripts/lw.sh headroom-wheel    # Build headroom-ai wheel for Docker (compact artifact, no source tree)
 #   ./scripts/lw.sh start-prod        # Start proxy with prod env (Infisical + puma-lan config)
 #   ./scripts/lw.sh check-integrations  Verify integration with external packages (headroom)
 #
@@ -45,7 +46,8 @@ Commands:
   startuv           Start dev proxy via uv (no venv activation needed)
   push              Push patched/main to origin (regular push, not force)
   sbr               Full cycle: sync → build → start
-  docker-build      Build + push Docker image (delegates to build-and-push.sh)
+  docker-build      Build Docker image (builds headroom wheel + calls build-and-push.sh)
+  headroom-wheel    Build headroom-ai wheel for compact Docker artifact (~20 MB)
    start-prod        Start source-code proxy with prod config + Infisical secrets
    check-integrations Verify integration with external packages (headroom)
    help              Show this help message
@@ -440,9 +442,45 @@ cmd_sbr() {
   cmd_start
 }
 
+cmd_headroom_wheel() {
+  assert_in_repo
+
+  local headroom_dir
+  headroom_dir="$(cd "$REPO_DIR/../better-headroom" && pwd)"
+
+  if [[ ! -d "$headroom_dir" ]]; then
+    echo "ERROR: better-headroom not found at $headroom_dir"
+    echo "  Expected sibling of better-litellm repo."
+    exit 1
+  fi
+
+  if ! command -v maturin &> /dev/null; then
+    echo "maturin not found — installing via pip..."
+    if ! command -v pip &> /dev/null; then
+      echo "ERROR: pip not found. Install Python + pip first, or manually: pip install maturin"
+      exit 1
+    fi
+    pip install maturin 2>&1 | tail -1
+  fi
+
+  echo "=== Building headroom-ai wheel ==="
+  echo "  source: $headroom_dir"
+  echo "  output: $REPO_DIR/.wheels/"
+
+  mkdir -p "$REPO_DIR/.wheels"
+  (cd "$headroom_dir" && maturin build --release --out "$REPO_DIR/.wheels/")
+
+  echo "Wheel built:"
+  ls -lh "$REPO_DIR/.wheels/"*.whl 2>/dev/null || echo "(none — check build output)"
+}
+
 cmd_docker_build() {
   assert_in_repo
 
+  # Step 1: Build headroom-ai wheel (compact artifact, not the 800 MB source tree)
+  cmd_headroom_wheel
+
+  # Step 2: Build Docker image
   if [[ ! -f "$SCRIPT_DIR/build-and-push.sh" ]]; then
     echo "build-and-push.sh not found at $SCRIPT_DIR/build-and-push.sh"
     exit 1
@@ -536,7 +574,8 @@ case "${1:-help}" in
   push)       cmd_push ;;
   sbr)        cmd_sbr ;;
   start-prod) cmd_start_prod ;;
- docker-build) shift; cmd_docker_build "$@" ;;
+  docker-build) shift; cmd_docker_build "$@" ;;
+  headroom-wheel) cmd_headroom_wheel ;;
    check-integrations) cmd_check_integrations ;;
    help|-h|--help)  usage ;;
   *)          echo "Unknown command: $1"; echo; usage; exit 1 ;;
