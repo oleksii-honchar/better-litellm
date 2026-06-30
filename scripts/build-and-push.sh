@@ -56,7 +56,7 @@ VERSION="$(grep '^version' "$FORK_DIR/pyproject.toml" | head -1 | cut -d'"' -f2)
 COMMIT="$(git -C "$FORK_DIR" rev-parse --short HEAD)"
 TIMESTAMP="$(date +"%y%m%d%H")"
 TAG="main-v${VERSION}-stable-${TIMESTAMP}"
-PLATFORM="linux/amd64,linux/arm64"
+PLATFORM="linux/amd64"
 
 # ── Parse flags ────────────────────────────────────────────────────────────────
 while [ $# -gt 0 ]; do
