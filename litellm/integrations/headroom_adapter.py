@@ -11,10 +11,7 @@ This adapter bridges the gap by:
 
 from __future__ import annotations
 
-import time
 from typing import Any, Optional
-
-import tiktoken
 
 from litellm.integrations.custom_logger import CustomLogger
 from litellm.types.llms.openai import ChatCompletionRequest as _ChatCompletionRequest
@@ -84,7 +81,11 @@ class HeadroomCallbackAdapter(CustomLogger):
             )
         self._headroom_cb = HeadroomCallback(*args, **kwargs)  # type: ignore[misc]
 
-        # Initialize Headroom OTEL metrics with graceful fallback
+        # Initialize the global Headroom OTEL metrics singleton (used by the
+        # pipeline inside HeadroomCallback).  The adapter itself no longer
+        # records metrics — the pipeline's own record_pipeline_run() call
+        # (via compress() → pipeline.apply()) produces accurate counts with
+        # message overhead, per-stage timing, and transform metadata.
         if configure_otel_metrics is not None and OTelMetricsConfig is not None:
             try:
                 self._otel_metrics = configure_otel_metrics(  # type: ignore[misc]
@@ -105,34 +106,6 @@ class HeadroomCallbackAdapter(CustomLogger):
         """Whether cloud compression is enabled."""
         return self._headroom_cb.cloud_mode
 
-    @staticmethod
-    def _count_tokens(messages: list, model_name: str) -> int:
-        """Count tokens in messages using tiktoken.
-
-        Returns 0 if messages is empty, or if tiktoken fails to encode.
-        """
-        if not messages:
-            return 0
-        try:
-            try:
-                enc = tiktoken.encoding_for_model(model_name)
-            except (KeyError, ValueError):
-                enc = tiktoken.encoding_for_model("gpt-3.5-turbo")  # fallback
-
-            total = 0
-            for msg in messages:
-                content = msg.get("content", "")
-                if isinstance(content, str):
-                    total += len(enc.encode(content))
-                elif isinstance(content, list):
-                    for part in content:
-                        if isinstance(part, dict) and "text" in part:
-                            total += len(enc.encode(part["text"]))
-            return total
-        except Exception:
-            # Token counting failure should not block compression
-            return 0
-
     async def async_pre_call_hook(
         self,
         user_api_key_dict: Any,
@@ -147,6 +120,11 @@ class HeadroomCallbackAdapter(CustomLogger):
 
         We extract the API key string from user_api_key_dict (or use a fallback)
         and skip the cache parameter (HeadroomCallback doesn't use it).
+
+        Metrics are recorded by the pipeline inside HeadroomCallback (via
+        compress() → pipeline.apply() → record_pipeline_run()), NOT here.
+        The adapter only bridges the CustomLogger interface — it does not
+        record its own metrics.
         """
         # Extract API key string from the dict (LiteLLM uses dict for auth)
         user_api_key: str = ""
@@ -156,44 +134,8 @@ class HeadroomCallbackAdapter(CustomLogger):
             elif hasattr(user_api_key_dict, "token"):
                 user_api_key = getattr(user_api_key_dict, "token", "")
 
-        # Extract model and messages for metrics
-        model = data.get("model", "")
-        messages = data.get("messages", [])
-
-        # Count tokens before compression
-        tokens_before = self._count_tokens(messages, model) if isinstance(messages, list) else 0
-
-        # Measure compression duration
-        start_time = time.monotonic()
-
-        # Delegate to the real HeadroomCallback
-        result = await self._headroom_cb.async_pre_call_hook(
+        return await self._headroom_cb.async_pre_call_hook(
             user_api_key=user_api_key,
             data=data,
             call_type=call_type,
         )
-        end_time = time.monotonic()
-        duration_ms = int((end_time - start_time) * 1000)
-
-        # Count tokens after compression (from result)
-        tokens_after = 0
-        if result is not None:
-            result_messages = result.get("messages", [])
-            if isinstance(result_messages, list):
-                tokens_after = self._count_tokens(result_messages, model)
-
-        # Record OTEL metrics (failure must not block compression)
-        if self._otel_metrics is not None:
-            try:
-                self._otel_metrics.record_pipeline_run(
-                    model=model,
-                    provider="local" if not self.cloud_mode else "cloud",
-                    tokens_before=tokens_before,
-                    tokens_after=tokens_after,
-                    duration_ms=duration_ms,
-                )
-            except Exception:
-                # Metrics failure should not block compression
-                pass
-
-        return result
