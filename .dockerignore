@@ -35,12 +35,9 @@ __pycache__/
 .ruff_cache/
 **/pyvenv.cfg
 
-# Pre-built headroom wheel artifacts (see Makefile headroom-wheel target)
-.wheels/
-
-# better-headroom source tree — NOT copied into Docker anymore.
-# A pre-built wheel from .wheels/ is used instead.
-# These exclude patterns prevent accidental source pulls:
+# better-headroom exclusions — these directories are not needed for the
+# wheel build in Docker (headroom-builder stage). Excluding them reduces
+# the Docker build context from ~960 MB to ~110 MB:
 better-headroom/target/
 better-headroom/.git/
 better-headroom/.github/

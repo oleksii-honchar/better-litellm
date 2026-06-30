@@ -1,13 +1,27 @@
-# Base image for building
+# ── Global build args (must be before first FROM) ──────────────────────────────
 ARG LITELLM_BUILD_IMAGE=cgr.dev/chainguard/wolfi-base@sha256:31da6565f35af6401031c1d7aa91dc84ac76c5c48edd17fb90f0ed9e3173c7a9
-
-# Runtime image
 ARG LITELLM_RUNTIME_IMAGE=cgr.dev/chainguard/wolfi-base@sha256:31da6565f35af6401031c1d7aa91dc84ac76c5c48edd17fb90f0ed9e3173c7a9
 ARG UV_IMAGE=ghcr.io/astral-sh/uv:0.11.7@sha256:240fb85ab0f263ef12f492d8476aa3a2e4e1e333f7d67fbdd923d00a506a516a
 
+# ── Build stage 0: headroom-ai wheel (native Linux build) ────────────────────
+# Compiled natively so the Rust .so inside the wheel matches the Docker target.
+# Python 3.12-slim has the libc/toolchain maturin needs; the wheel artifact
+# (~20 MB) alone is passed to the lite-llm builder stage below.
+FROM python:3.12-slim AS headroom-builder
+WORKDIR /build
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    curl build-essential pkg-config libssl-dev \
+    && rm -rf /var/lib/apt/lists/*
+# Install latest stable Rust (Debian's rustc 1.85 is too old for headroom's deps)
+RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+ENV PATH="/root/.cargo/bin:${PATH}"
+RUN pip install maturin
+COPY better-headroom/ /build/
+RUN maturin build --release --out /wheels && rm -rf /build
+
+# ── Build stage 1: lite-llm builder ──────────────────────────────────────────
 FROM $UV_IMAGE AS uvbin
 
-# Builder stage
 FROM $LITELLM_BUILD_IMAGE AS builder
 
 WORKDIR /app
@@ -37,11 +51,11 @@ COPY pyproject.toml uv.lock ./
 COPY enterprise/pyproject.toml enterprise/
 COPY litellm-proxy-extras/pyproject.toml litellm-proxy-extras/
 
-# Pre-install headroom from pre-built wheel (compact artifact ~20 MB) so uv
-# never tries to resolve the local path dependency from pyproject.toml.
-# Build the wheel first with: make headroom-wheel  (or: cd ../better-headroom && maturin build --release --out ../better-litellm/.wheels/)
-COPY .wheels/ /tmp/headroom-wheels/
-RUN uv pip install /tmp/headroom-wheels/*.whl && rm -rf /tmp/headroom-wheels
+# Pre-install headroom from the wheel built in stage 0 (native Linux, ~20 MB)
+# so uv never tries to resolve the local path dependency from pyproject.toml.
+COPY --from=headroom-builder /wheels/*.whl /tmp/headroom-wheels/
+RUN uv venv "${UV_PROJECT_ENVIRONMENT}" && \
+    uv pip install /tmp/headroom-wheels/*.whl && rm -rf /tmp/headroom-wheels
 
 # Remove the local path dependency so uv resolves from the pre-installed wheel.
 # (The path dep stays in pyproject.toml for local dev — only removed inside Docker.)

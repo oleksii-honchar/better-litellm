@@ -15,8 +15,8 @@
 #   ./scripts/lw.sh startuv           # Start via uv (no venv activation needed)
 #   ./scripts/lw.sh push              # Push patched/main to origin
 #   ./scripts/lw.sh sbr               # Full cycle: sync → build → start
-#   ./scripts/lw.sh docker-build      # Build Docker image (builds headroom wheel first, then delegates to build-and-push.sh)
-#   ./scripts/lw.sh headroom-wheel    # Build headroom-ai wheel for Docker (compact artifact, no source tree)
+#   ./scripts/lw.sh docker-build      # Build Docker image (headroom wheel built inside Docker via multi-stage)
+#   ./scripts/lw.sh headroom-wheel    # Build headroom-ai wheel locally (dev utility, not needed for docker-build)
 #   ./scripts/lw.sh start-prod        # Start proxy with prod env (Infisical + puma-lan config)
 #   ./scripts/lw.sh check-integrations  Verify integration with external packages (headroom)
 #
@@ -477,10 +477,6 @@ cmd_headroom_wheel() {
 cmd_docker_build() {
   assert_in_repo
 
-  # Step 1: Build headroom-ai wheel (compact artifact, not the 800 MB source tree)
-  cmd_headroom_wheel
-
-  # Step 2: Build Docker image
   if [[ ! -f "$SCRIPT_DIR/build-and-push.sh" ]]; then
     echo "build-and-push.sh not found at $SCRIPT_DIR/build-and-push.sh"
     exit 1
