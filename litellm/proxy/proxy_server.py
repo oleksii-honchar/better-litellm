@@ -15934,6 +15934,37 @@ if _HEADROOM_AVAILABLE and os.environ.get("HEADROOM_MIDDLEWARE_ENABLED", "").low
     min_tokens = int(os.environ.get("HEADROOM_MIN_TOKENS", "500"))
     model_limit = int(os.environ.get("HEADROOM_MODEL_LIMIT", "200000"))
 
+    # HEADROOM_EXCLUDE_TOOLS: comma-separated tool names/globs to exclude
+    # from compression. Supports fnmatch patterns (* ? [). Case-insensitive.
+    # Example: HEADROOM_EXCLUDE_TOOLS=paperless-*  (all paperless MCP tools)
+    exclude_tools_raw = os.environ.get("HEADROOM_EXCLUDE_TOOLS", "").strip()
+    if exclude_tools_raw:
+        import functools as _functools
+
+        import headroom.compress as _hr_compress
+        from headroom.transforms.content_router import ContentRouter as _ContentRouter
+
+        _exclude_set = frozenset(
+            t.strip() for t in exclude_tools_raw.split(",") if t.strip()
+        )
+        _orig_get_pipeline = _hr_compress._get_pipeline
+
+        @_functools.wraps(_orig_get_pipeline)
+        def _hr_pipeline_with_excludes():
+            pipeline = _orig_get_pipeline()
+            for _t in pipeline.transforms:
+                if isinstance(_t, _ContentRouter):
+                    existing = _t.config.exclude_tools or set()
+                    _t.config.exclude_tools = existing | _exclude_set
+                    break
+            return pipeline
+
+        _hr_compress._get_pipeline = _hr_pipeline_with_excludes
+        verbose_proxy_logger.info(
+            "HEADROOM_EXCLUDE_TOOLS=%s applied to compression pipeline",
+            exclude_tools_raw,
+        )
+
     app.add_middleware(
         CompressionMiddleware,
         min_tokens=min_tokens,
