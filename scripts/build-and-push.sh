@@ -23,30 +23,12 @@
 
 set -euo pipefail
 
-# Cleanup copied better-headroom source on exit
-_cleanup_headroom() {
-  local hc="${HEADROOM_IN_CONTEXT:-}"
-  if [[ -n "$hc" && -d "$hc" && "$hc" != "${FORK_DIR:-}" ]]; then
-    rm -rf "$hc"
-    echo "Cleaned up $hc"
-  fi
-}
-trap _cleanup_headroom EXIT
-
 # ── Configuration ──────────────────────────────────────────────────────────────
 REGISTRY="docker.io"
 NAMESPACE="tuiteraz"
 REPO="better-litellm"
 IMAGE_BASE="${REGISTRY}/${NAMESPACE}/${REPO}"
 FORK_DIR="$(cd "$(dirname "$0")/.." && pwd)"
-
-# ── Source copy: better-headroom ────────────────────────────────────────────────
-# better-headroom lives as a sibling directory (../better-headroom).
-# Docker cannot access paths outside the build context, so we copy the
-# source into the context before building.  Only the files needed for the
-# maturin build are included — the Rust build cache (target/) is excluded.
-HEADROOM_DIR="${BETTER_HEADROOM_DIR:-$(cd "$(dirname "$0")/../.." && pwd)/better-headroom}"
-HEADROOM_IN_CONTEXT="${FORK_DIR}/better-headroom"
 
 # ── Defaults ───────────────────────────────────────────────────────────────────
 BUILD_ONLY=false
@@ -127,49 +109,6 @@ echo "Image base:      ${IMAGE_BASE}"
 echo "Tag:             ${TAG}"
 echo "Platform:        ${PLATFORM}"
 echo ""
-
-# ── Copy headroom source into build context for Docker multi-stage build ───────
-if [[ -d "$HEADROOM_DIR" ]]; then
-  echo "=== Copying better-headroom into build context ==="
-  echo "  Source:      $HEADROOM_DIR"
-  echo "  Destination: $HEADROOM_IN_CONTEXT"
-  echo ""
-
-  if command -v rsync &> /dev/null; then
-    rsync -a --delete --exclude='target' --exclude='.venv' --exclude='__pycache__' \
-      --exclude='*.pyc' --exclude='dist' --exclude='agent-evals' \
-      --exclude='tests' --exclude='e2e' --exclude='docker' --exclude='.git' \
-      "$HEADROOM_DIR/" "$HEADROOM_IN_CONTEXT/"
-  else
-    rm -rf "$HEADROOM_IN_CONTEXT"
-    cp -r "$HEADROOM_DIR" "$HEADROOM_IN_CONTEXT"
-    # Remove heavy dirs after copy (cleaner to use rsync, but this works)
-    rm -rf "$HEADROOM_IN_CONTEXT/target" "$HEADROOM_IN_CONTEXT/.venv"
-  fi
-
-  # Verify crates/ present (needed for Rust/pyo3 wheel build)
-  if [[ ! -d "${HEADROOM_IN_CONTEXT}/crates" ]]; then
-    echo "ERROR: better-headroom/crates/ not found — Rust/pyo3 wheel build will fail!"
-    echo "  Source:      $HEADROOM_DIR"
-    echo "  Destination: $HEADROOM_IN_CONTEXT"
-    exit 1
-  fi
-
-  copied_size=$(du -sh "$HEADROOM_IN_CONTEXT" 2>/dev/null | cut -f1)
-  echo "  Copied: $copied_size (without target/ which is $(du -sh "$HEADROOM_DIR/target" 2>/dev/null | cut -f1))"
-  echo ""
-elif [[ -d "$HEADROOM_IN_CONTEXT" ]]; then
-  echo "=== Using existing better-headroom in build context ==="
-  echo "  (already present at $HEADROOM_IN_CONTEXT)"
-  echo ""
-else
-  echo "WARNING: better-headroom not found at $HEADROOM_DIR or $HEADROOM_IN_CONTEXT"
-  echo "  Docker build stage 0 (headroom-builder) will fail."
-  echo "  To fix: git clone better-headroom as sibling of better-litellm,"
-  echo "  or run the build from a directory that contains both repos."
-  echo ""
-  exit 1
-fi
 
 # ── Helper ─────────────────────────────────────────────────────────────────────
 run_cmd() {

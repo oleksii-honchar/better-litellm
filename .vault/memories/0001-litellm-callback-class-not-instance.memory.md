@@ -7,10 +7,12 @@ tags: [litellm, callback, gotcha, headroom]
 see_also:
   - "adrs/0001-transformers-individual-deps.adr.md"
 deprecated:
-  date: null
-  reason: null
-  superseded_by: null
+  date: "2026-07-07"
+  reason: "Headroom integration removed per ADR-0006"
+  superseded_by: "adrs/0006-abandon-headroom-adopt-claw-compactor.adr.md"
 ---
+
+> **⚠️ DEPRECATED** — Headroom integration was removed per ADR-0006. This memory is preserved for historical reference only.
 
 # Memory: LiteLLM proxy callback resolution returns CLASS, not instance
 

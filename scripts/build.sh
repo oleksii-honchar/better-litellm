@@ -21,13 +21,8 @@ echo "Tag:       $TAG"
 echo "Image:     $IMAGE"
 echo ""
 
-# Step 1: Build a compact headroom-ai wheel (no Rust target/, tests, docs, etc.)
-echo "--- Step 1: Building headroom-ai wheel ---"
-make -C "$FORK_DIR" headroom-wheel
-
-# Step 2: Build Docker image (uses pre-built wheel from .wheels/)
-echo ""
-echo "--- Step 2: Building Docker image ---"
+# Step 1: Build Docker image
+echo "--- Building Docker image ---"
 docker build -t "$IMAGE" -f "$FORK_DIR/Dockerfile" "$FORK_DIR"
 
 echo ""

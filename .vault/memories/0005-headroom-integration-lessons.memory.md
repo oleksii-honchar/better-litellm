@@ -2,12 +2,18 @@
 type: memory
 title: "Headroom ASGI integration deployed to puma.lan — lessons learned"
 createdAt: "2026-06-30T12:00:00Z"
-updatedAt: "2026-06-30T12:00:00Z"
+updatedAt: "2026-07-07T00:00:00Z"
 tags: [litellm, headroom, asgi, middleware, deployment, puma]
 see_also:
   - "adrs/0006-abandon-headroom-adopt-claw-compactor.adr.md"
   - "memories/0006-no-drop-in-litellm-compression.memory.md"
+deprecated:
+  date: "2026-07-07"
+  reason: "Headroom integration removed per ADR-0006"
+  superseded_by: "adrs/0006-abandon-headroom-adopt-claw-compactor.adr.md"
 ---
+
+> **⚠️ DEPRECATED** — Headroom integration was removed per ADR-0006. This memory is preserved for historical reference only.
 
 ## Fact
 

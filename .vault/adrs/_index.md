@@ -2,7 +2,7 @@
 type: index
 title: "ADRs"
 createdAt: "2026-06-23T22:30:00Z"
-updatedAt: "2026-06-30T14:30:00Z"
+updatedAt: "2026-07-07T00:00:00Z"
 tags: []
 ---
 

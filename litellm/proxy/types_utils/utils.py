@@ -61,8 +61,8 @@ async def _async_post_call_response_headers_hook_pass_through(
 def _add_pass_through_hook(cls: type, hook_name: str) -> None:
     """Monkey-patch a pass-through async method onto a callback class.
 
-    Some third-party callback classes (e.g. HeadroomCallback from headroom-ai)
-    don't inherit from CustomLogger but LiteLLM's proxy still calls these hooks.
+    Some third-party callback classes don't inherit from CustomLogger but
+    LiteLLM's proxy still calls these hooks.
     We add a no-op so the proxy pipeline doesn't crash with AttributeError.
     """
     fn = _get_pass_through_hook(hook_name)
@@ -120,7 +120,7 @@ def get_instance_fn(value: str, config_file_path: Optional[str] = None) -> Any:
                 spec.loader.exec_module(module)  # type: ignore
             else:
                 # Fall back to standard import — allows installed packages
-                # (e.g. headroom-ai) to be referenced by dotted path.
+                # to be referenced by dotted path.
                 module = importlib.import_module(module_name)
         else:
             # Dynamically import the module
@@ -129,27 +129,8 @@ def get_instance_fn(value: str, config_file_path: Optional[str] = None) -> Any:
         # Get the instance from the module
         instance = getattr(module, instance_name)
 
-        # Wrap HeadroomCallback — it inherits from object, not CustomLogger,
-        # so the proxy's _callback_capabilities() skips it entirely. Our
-        # adapter class inherits from CustomLogger and adapts the hook signatures.
-        if value == "headroom.integrations.litellm_callback.HeadroomCallback":
-            try:
-                from litellm.integrations.headroom_adapter import (  # noqa: PLC0415
-                    HeadroomCallbackAdapter,
-                )
-            except ImportError as e:
-                from litellm._logging import verbose_proxy_logger
-
-                verbose_proxy_logger.warning(
-                    "Failed to import HeadroomCallbackAdapter, falling back to raw "
-                    "HeadroomCallback (compression will not work): %s",
-                    e,
-                )
-            else:
-                return HeadroomCallbackAdapter()
-
         # Ensure callback classes have LiteLLM's standard hooks as pass-throughs.
-        # Installed packages (e.g. headroom-ai) may not inherit from CustomLogger,
+        # Installed packages may not inherit from CustomLogger,
         # but the proxy calls these methods on all non-guardrail callbacks.
         if isinstance(instance, type):
             if not hasattr(instance, "async_post_call_success_hook"):

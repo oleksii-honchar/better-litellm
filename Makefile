@@ -1,7 +1,7 @@
 # LiteLLM Makefile
 # Simple Makefile for running tests and basic development tasks
 
-.PHONY: help headroom-wheel test test-unit test-unit-llms test-unit-proxy-guardrails test-unit-proxy-core test-unit-proxy-misc \
+.PHONY: help test test-unit test-unit-llms test-unit-proxy-guardrails test-unit-proxy-core test-unit-proxy-misc \
 	test-unit-integrations test-unit-core-utils test-unit-other test-unit-root \
 	test-proxy-unit-a test-proxy-unit-b test-integration test-unit-helm \
 	info lint lint-dev format \
@@ -42,14 +42,6 @@ help:
 
 UV := uv
 UV_RUN := $(UV) run --no-sync
-
-# Build a compact wheel of better-headroom for Docker (avoids copying 800 MB source tree)
-.PHONY: headroom-wheel
-headroom-wheel:
-	@echo "=== Building headroom-ai wheel ==="
-	@mkdir -p .wheels
-	cd ../better-headroom && maturin build --release --out ../better-litellm/.wheels/
-	@echo "Wheel built: $$(ls .wheels/)"
 
 # Show info
 info:

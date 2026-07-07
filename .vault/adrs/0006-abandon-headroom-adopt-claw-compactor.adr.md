@@ -2,9 +2,9 @@
 type: adr
 id: ADR-0006
 title: "Abandon headroom compression, adopt Claw Compactor"
-status: accepted
+status: implemented
 createdAt: "2026-06-30T12:00:00Z"
-updatedAt: "2026-06-30T12:00:00Z"
+updatedAt: "2026-07-07T00:00:00Z"
 tags: [compression, headroom, claw-compactor, migration, strategic]
 supersedes: []
 superseded_by: []
@@ -71,3 +71,7 @@ Requires `transformers` and `onnxruntime` packages (~320MB container increase in
 - **Negative:** 1-2 weeks development for custom ASGI middleware (Claw Compactor not purpose-built for LiteLLM)
 - **Negative:** 12,000+ lines of code — fairly complex codebase to understand
 - **Neutral:** No existing LiteLLM examples to reference; must build integration from scratch
+
+## Implementation Note
+
+**Implementation completed: 2026-07-07.** Headroom integration code removed from the fork on branch `fix/remove-headroom`. All headroom-related dependencies, middleware, callback adapters, and configuration have been stripped. Architecture and memory vault nodes archived/deprecated accordingly.

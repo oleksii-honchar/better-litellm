@@ -3,15 +3,22 @@ type: architecture
 c4_level: 1
 c4_type: container
 title: "LiteLLM Proxy + Headroom — Integration Container Map"
+status: archived
 createdAt: "2026-06-30T12:00:00Z"
-updatedAt: "2026-06-30T12:00:00Z"
+updatedAt: "2026-07-07T00:00:00Z"
 tags: [architecture, C4, container, litellm, headroom, middleware]
 see_also:
   - "architectures/0001-litellm-proxy-component.component.md"
   - "architectures/0003-litellm-proxy-code.code.md"
   - "memories/0004-litellm-proxy-cors-workaround.memory.md"
   - "memories/0003-litellm-proxy-health-endpoints.memory.md"
+deprecated:
+  date: "2026-07-07"
+  reason: "Headroom integration removed per ADR-0006"
+  superseded_by: "adrs/0006-abandon-headroom-adopt-claw-compactor.adr.md"
 ---
+
+> **⚠️ ARCHIVED** — Headroom integration was removed per ADR-0006. This architecture node is preserved for historical reference only.
 
 # LiteLLM Proxy + Headroom — Integration Container Map
 
