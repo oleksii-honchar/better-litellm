@@ -166,3 +166,66 @@ class TestDeepSeekThinkingParams:
         )
 
         assert "thinking" not in result
+
+
+class TestDeepSeekDefaultBaseUrl:
+    """Test that DeepSeek provider uses the stable API base URL."""
+
+    def setup_method(self):
+        self.config = DeepSeekChatConfig()
+
+    def test_get_openai_compatible_provider_info_default_base_url(self):
+        """Test that _get_openai_compatible_provider_info returns stable base URL by default."""
+        api_base, api_key = self.config._get_openai_compatible_provider_info(
+            api_base=None, api_key=None
+        )
+
+        assert api_base == "https://api.deepseek.com"
+        assert "/beta" not in api_base
+
+    def test_get_openai_compatible_provider_info_respects_custom_base(self):
+        """Test that _get_openai_compatible_provider_info respects custom api_base."""
+        custom_base = "https://custom.deepseek.example.com"
+        api_base, _ = self.config._get_openai_compatible_provider_info(
+            api_base=custom_base, api_key=None
+        )
+
+        assert api_base == custom_base
+
+    def test_get_complete_url_default_base_url(self):
+        """Test that get_complete_url uses stable base URL when api_base is not provided."""
+        url = self.config.get_complete_url(
+            api_base=None,
+            api_key=None,
+            model="deepseek-chat",
+            optional_params={},
+            litellm_params={},
+        )
+
+        assert url == "https://api.deepseek.com/chat/completions"
+        assert "/beta" not in url
+
+    def test_get_complete_url_respects_custom_base(self):
+        """Test that get_complete_url respects custom api_base."""
+        custom_base = "https://custom.deepseek.example.com"
+        url = self.config.get_complete_url(
+            api_base=custom_base,
+            api_key=None,
+            model="deepseek-chat",
+            optional_params={},
+            litellm_params={},
+        )
+
+        assert url == "https://custom.deepseek.example.com/chat/completions"
+
+    def test_get_complete_url_preserves_trailing_completions(self):
+        """Test that get_complete_url does not double-append /chat/completions."""
+        url = self.config.get_complete_url(
+            api_base="https://api.deepseek.com/chat/completions",
+            api_key=None,
+            model="deepseek-chat",
+            optional_params={},
+            litellm_params={},
+        )
+
+        assert url == "https://api.deepseek.com/chat/completions"
