@@ -1,6 +1,12 @@
 # syntax=docker/dockerfile:1.7
 
 # Base image for building
+# All base images below are pinned by digest — no floating tags. The digests are
+# multi-arch OCI index digests (linux/amd64 + linux/arm64 verified via
+# `docker buildx imagetools inspect <ref>`), so digest pinning is safe for the
+# multi-arch buildx flow and is stricter than tag pinning. Re-verify the index
+# digests when bumping any image. (v1.106.3 bump: wolfi-base digest re-verified
+# against upstream's updated pin, matching the runtime image below.)
 ARG LITELLM_BUILD_IMAGE=cgr.dev/chainguard/wolfi-base@sha256:81211e15a86ea1d5357f284482af45730c51de45eaf10ad9ce205d6bfc2df323
 
 # Runtime image
@@ -53,6 +59,8 @@ USER root
 COPY --from=uvbin /uv /usr/local/bin/uv
 COPY --from=uvbin /uvx /usr/local/bin/uvx
 
+# coreutils: build steps and docker/build_admin_ui.sh rely on GNU coreutils
+# (sha256sum for checksum verification); kept from the fork's build hardening.
 RUN apk add --no-cache \
     bash \
     gcc \
@@ -64,7 +72,8 @@ RUN apk add --no-cache \
     openssl-dev \
     nodejs \
     npm \
-    libsndfile
+    libsndfile \
+    coreutils
 
 ENV UV_PROJECT_ENVIRONMENT=/app/.venv \
     UV_LINK_MODE=copy \
