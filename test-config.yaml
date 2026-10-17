@@ -1,0 +1,12 @@
+# Minimal test config — validates the image loads config.yaml correctly.
+# One model with a fake API base — we only care that the proxy starts and routes.
+
+model_list:
+  - model_name: test-qwen
+    litellm_params:
+      model: openai/test-qwen
+      api_base: http://localhost:19999/v1  # Non-existent — just for routing validation
+      api_key: test
+
+general_settings:
+  database_url: postgresql://litellm:litellm_db_password@test-db:5432/litellm
